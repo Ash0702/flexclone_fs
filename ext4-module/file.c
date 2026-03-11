@@ -1247,7 +1247,11 @@ ssize_t scorw_generic_perform_write(struct file *file, struct iov_iter *i, loff_
 		}
 		if(is_see_thru_ro){
 			printk("going to scorw_write_see_thru\n");
-			return scorw_write_see_thru_ro(file, i, pos);
+			//return scorw_write_see_thru_ro(file, pos);
+			pos = scorw_write_see_thru_ro(file , i , pos);
+			if(pos < 0 ) {
+				return pos;
+			}
 			// return;
 		}
 	}

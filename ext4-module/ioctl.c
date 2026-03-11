@@ -27,6 +27,14 @@
 #include "fsmap.h"
 #include <trace/events/ext4.h>
 
+//MAHA_AARSH
+// TODO Move this into linux/fsmap
+#define EXT4_UPDATE_VERSION _IO('S' , 1) 
+extern int update_version(struct inode* c_inode);
+//MAHA_AARSH
+
+
+
 typedef void ext4_update_sb_callback(struct ext4_super_block *es,
 				       const void *arg);
 
@@ -1616,6 +1624,17 @@ resizefs_out:
 		return ext4_ioctl_getuuid(EXT4_SB(sb), (void __user *)arg);
 	case EXT4_IOC_SETFSUUID:
 		return ext4_ioctl_setuuid(filp, (const void __user *)arg);
+	
+	//MAHA_AARSH_start
+	case EXT4_UPDATE_VERSION:
+		// use file_inode(filp) 
+		// return 0	for success
+		printk("Calling update for child\n"); 
+		return update_version(file_inode(filp));
+	//MAHA_AARSH_end
+		
+
+
 	default:
 		return -ENOTTY;
 	}

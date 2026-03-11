@@ -59,6 +59,10 @@ char *copy_size = "COPY_SIZE";
 char *blocks_to_copy = "BLOCKS_TO_COPY";
 char *num_ranges = "NUM_RANGES";        //How many ranges have been supplied to child?
 char *version = "v";
+//MAHA_AARSH_VERSION_start
+char *curr_version = "curr_version";
+char *par_org = "PAR_ORGY";
+//MAHA_AARSH_VERSION_end
 unsigned long scorw_get_process_usage_count(struct scorw_inode *scorw_inode);
 static int scorw_is_in_range(struct scorw_inode *scorw_inode, unsigned blk_num);
 void scorw_dec_process_usage_count(struct scorw_inode *scorw_inode);
@@ -536,6 +540,73 @@ unsigned scorw_get_blocks_to_copy_attr_val(struct inode *inode)
         }
         return 0;
 }
+
+//MAHA_AARSH_start
+
+//Version starts from 1
+unsigned long scorw_get_curr_version_attr_val(struct inode *inode)
+{
+        unsigned long version_val;
+        int buf_size;
+
+        //printk("Inside scorw_get_child_version_attr_val\n");
+        buf_size = ext4_xattr_get(inode, 1, curr_version, &version_val, sizeof(unsigned long));
+        if(buf_size > 0)
+        {
+                return version_val;
+        }
+        return 0;
+}
+
+//
+void scorw_set_curr_version_attr_val(struct inode *inode , unsigned long val /*Value to be set*/)
+{
+        //printk("Inside scorw_get_child_version_attr_val\n");
+        ext4_xattr_set(inode, 1, curr_version, &val, sizeof(unsigned long), 0);
+}
+// Pass in parent inode
+unsigned long scorw_get_original_parent_size(struct inode * p_inode){
+	
+        unsigned long original_size;
+        int buf_size;
+
+        //printk("Inside scorw_get_child_version_attr_val\n");
+        buf_size = ext4_xattr_get(p_inode, 1, par_org, &original_size, sizeof(unsigned long));
+        if(buf_size > 0)
+        {
+                return original_size;
+        }
+	return 0;
+
+}
+
+int update_version(struct inode * c_inode){
+
+	struct scorw_inode * scorw_c_inode = NULL;
+	struct inode* p_inode = NULL;
+	unsigned long curr_par_size , org_par_size , updated_version;	
+
+
+	if(!scorw_is_child_file(c_inode , 0)){
+		return -1; // not child
+	}	
+	scorw_c_inode = scorw_find_inode(c_inode);
+	p_inode = scorw_c_inode->i_par_vfs_inode;
+	
+	org_par_size = scorw_get_original_parent_size(p_inode);
+	curr_par_size = i_size_read(p_inode); 
+	updated_version = curr_par_size/org_par_size;
+
+	printk("upd_version = %ld , curr_par_size = %ld , org_par_size = %ld\n" , updated_version , curr_par_size , org_par_size);
+
+	scorw_set_curr_version_attr_val(c_inode , updated_version);
+	return 0;
+}
+
+//MAHA_AARSH_end
+
+
+
 
 unsigned long scorw_get_child_version_attr_val(struct inode *inode)
 {
@@ -1219,6 +1290,7 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
         }
 }
 
+//return 1 if child inode
 int scorw_is_child_file(struct inode* inode, int consult_extended_attributes)
 {
         unsigned long p_ino_num;
@@ -1991,6 +2063,7 @@ ssize_t scorw_read_from_child(struct kiocb *iocb, struct iov_iter *to, unsigned 
 	return ret;
 }
 
+//MAHA_AARSH_start
 //Serve request from parent's page cache
 ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *iocb, struct iov_iter *to, unsigned batch_start_blk, unsigned batch_end_blk)
 {
@@ -1999,8 +2072,10 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 	size_t expected_to_count = 0;
 	loff_t start = 0;
 	loff_t end = 0;
+	struct inode *c_inode;
 	struct inode *p_inode;  	//owner inode of inode on which read operation is being done
 	struct address_space *mapping;  //original address space mapping of vfs inode on which read is being done.
+	unsigned long par_curr_size = 0 , par_orig_size = 0 , curr_version = 0;
 
 	//printk("scorw_read_from_parent: reading using parent's page cache\n");
 	//save original mapping 
@@ -2009,7 +2084,10 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 	//change mapping
 	p_inode = scorw_inode->i_par_vfs_inode;
 	iocb->ki_filp->f_mapping = p_inode->i_mapping;
-
+	
+	//set child_inode
+	c_inode = scorw_inode->i_vfs_inode;
+	
 	old_to_count = to->count;
 	start = iocb->ki_pos;
 	end = scorw_min((iocb->ki_pos + to->count), ((unsigned long long)batch_end_blk << PAGE_SHIFT));
@@ -2021,6 +2099,20 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 	//Note: internally, in functions s.a. ext4_readpage, ext4_mpage_readpages,
 	//inode to which page belongs to is found using page->mapping->host.
 	//Hence, if there is miss in page cache of parent, parents extents will be used to read this page.  
+	
+	par_curr_size = i_size_read(p_inode);
+	par_orig_size = scorw_get_original_parent_size(p_inode);
+	
+	curr_version = scorw_get_curr_version_attr_val(c_inode);
+	if(curr_version < 1){ // this means we are reading for the first time , so we need to persist it as well
+		printk("first read from child : %d\n" , curr_version);
+		scorw_set_curr_version_attr_val(c_inode , 1);
+		curr_version = 1;
+	}
+
+	iocb->ki_pos = (curr_version - 1) * par_orig_size;
+	to->count = par_orig_size;
+
 	ret = generic_file_read_iter(iocb, to);
 	//printk("[pid: %d] %s(), read %ld bytes\n", current->pid, __func__, ret);
 	//BUG_ON(ret < 0);
@@ -2028,6 +2120,8 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 	{
 		to->count = old_to_count - ret;
 	}
+
+
 	//printk("[pid: %d] %s(), updated to->count: %lu after read\n", current->pid, __func__, to->count);
 
 	//restore original page cache mapping 
@@ -2035,6 +2129,7 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 
 	return ret;
 }
+//MAHA_AARSH_end
 
 struct uncopied_block* scorw_get_uncopied_block(struct scorw_inode *scorw_inode, unsigned block_num, int processing_type)
 {
@@ -4031,15 +4126,60 @@ void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_nu
 }
 
 
-// HAMARA CODE START //
+//MAHA_AARSH_start //
 
-ssize_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos){
-	
-	scorw_internal_copy_blocks(file, 0, 4096, 4096);
-	printk("Inside scorw_write_see_thru_ro: pos = %ld\n", pos);
-	
-	return -EROFS;
+loff_t scorw_write_see_thru_ro(struct file *file ,struct iov_iter* i , loff_t pos)
+{
+    struct inode *inode = file->f_mapping->host;
+    long long original_size;
+    loff_t current_size = i_size_read(inode);
+    loff_t src_offset, dest_offset;
+
+    // 1. Fetch the persistent block size from Extended Attributes on disk
+    original_size = scorw_get_original_parent_size(inode);
+
+    // 2. If it's 0, this is the very FIRST see-thru write!
+    if (original_size <= 0) {
+        // Round up to nearest block (4KB)
+        original_size = (current_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (original_size == 0) {
+            original_size = PAGE_SIZE; // Fallback if file was totally empty
+        }
+        
+        // PERSIST IT: Save it to disk so it survives close() and reboots!
+        ext4_xattr_set(inode, 1, par_org, &original_size, sizeof(long long), 0);
+    }
+
+    // Align current_size to 4KB blocks just to be safe
+    current_size = (current_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    // 3. Dynamic Offset Math (No arrays needed!)
+    // The latest version is ALWAYS the last 'original_size' chunk of the file.
+    if (current_size <= original_size) {
+        src_offset = 0;
+        dest_offset = original_size;
+    } else {
+        src_offset = current_size - original_size;
+        dest_offset = current_size;
+    }
+
+    // 4. Create the new version block
+    if (scorw_internal_copy_blocks(file, src_offset, dest_offset, original_size) < 0) {
+        printk(KERN_ERR "scorw: Failed to copy blocks for new version\n");
+        return -EIO;
+    }
+
+    // 5. Shift the write offset
+    // The modulo arithmetic here is magic: Whether the user writes at offset 0 
+    // or does an append write at the physical end-of-file, this math perfectly 
+    // maps them to the exact start of the newly created version block!
+    pos = (pos % original_size) + dest_offset;
+
+    return pos;
 }
+//MAHA_AARSH_end //
+
+
 
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos, loff_t dest_pos, size_t len)
 {

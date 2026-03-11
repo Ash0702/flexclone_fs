@@ -343,8 +343,12 @@ void scorw_read_barrier_begin(struct scorw_inode *p_scorw_inode, unsigned block_
 void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_num, struct uncopied_block **uncopied_block);
 
 //MAHA_VERSION_AARSH_start
-ssize_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos);
+loff_t scorw_write_see_thru_ro(struct file *file,struct iov_iter *i, loff_t pos);
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos, loff_t dest_pos, size_t len);
+unsigned long scorw_get_curr_version_attr_val(struct inode *inode);
+void scorw_set_curr_version_attr_val(struct inode *inode , unsigned long val /*Value to be set*/);
+unsigned long scorw_get_original_parent_size(struct inode * p_inode);
+int update_version(struct inode* c_inode);
 //MAHA_VERSION_AARSH_end
 #endif
 
