@@ -1234,6 +1234,7 @@ ssize_t scorw_generic_perform_write(struct file *file, struct iov_iter *i, loff_
 		printk("entered the is par inode check\n");
 		// Now check if it is in see thru ro mode, by fetching ranges
 		// loop over all child scorw_inodes and even if one has is_see_thru_ro set, then it is true
+		/*		
 		int i_1;
 		int is_see_thru_ro = 0;
 		for(i_1=0; i_1<=scorw_inode->i_last_child_index; i_1++)
@@ -1245,7 +1246,8 @@ ssize_t scorw_generic_perform_write(struct file *file, struct iov_iter *i, loff_
 				break;
 			}
 		}
-		if(is_see_thru_ro){
+		*/
+		if(scorw_inode->is_see_thru_ro){
 			printk("going to scorw_write_see_thru\n");
 			//return scorw_write_see_thru_ro(file, pos);
 			pos = scorw_write_see_thru_ro(file , i , pos);

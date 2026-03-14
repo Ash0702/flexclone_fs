@@ -2577,6 +2577,16 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 	extern char *scorw_range_end;
 	extern char *num_ranges;
 	extern char *version;
+	//MAHA_AARSH_VERSION_start
+	extern char *scorw_log; 
+	extern char *curr_version;
+	extern char *see_thru_ro;
+	int is_see_thru = 0; 
+	unsigned long variable_with_val_0 = 0; // just some local variable to init the version by 1
+	unsigned long variable_with_val_1 = 1; // just some local variable to init the version by 1
+	unsigned long parent_original_size; // TODO : remove this ( works only for our HACKY soln)
+	extern char* par_org; // Same TODO as above
+	//MAHA_AARSH_VERSION_end
 	char scorw_child_name[CHILD_NAME_LEN];
 	char scorw_range_name[CHILD_RANGE_LEN];
 
@@ -2630,6 +2640,11 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 		//printk("friends inode number: %lu\n", h_inodes->f_inode_num);
 		p_inode = ext4_iget(c_inode->i_sb, h_inodes->p_inode_num , EXT4_IGET_NORMAL);
 		f_inode = ext4_iget(c_inode->i_sb, h_inodes->f_inode_num , EXT4_IGET_NORMAL);
+		parent_original_size = i_size_read(p_inode);
+		if(parent_original_size % 4096 ) {
+			parent_original_size += ( 4096 - (parent_original_size%4096) );
+		}
+						
 
 		//value to be stored corresponding SCORW_PARENT
 		value = &(p_inode->i_ino);
@@ -2725,7 +2740,16 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 			////////////////////////////////////////////////////////////////////////////////////////////////////////
 			ext4_xattr_set(c_inode, 1, version, &init_version, sizeof(unsigned long), 0);
 			ext4_xattr_set(f_inode, 1, version, &init_version, sizeof(unsigned long), 0);
+			
 
+			// MAHA_AARSH_VERSION_start
+
+			ext4_xattr_set(p_inode, 1 , scorw_log , &(h_inodes->l_inode_num) , sizeof(unsigned long) , 0); 
+			ext4_xattr_set(c_inode , 1 , curr_version , &(variable_with_val_1) , sizeof(unsigned long), 0); 
+			ext4_xattr_set(p_inode , 1 , curr_version , &(variable_with_val_1) , sizeof(unsigned long), 0); 
+			ext4_xattr_set(p_inode , 1 , par_org , &(parent_original_size) , sizeof(unsigned long) , 0);
+			printk("Setting parent original size %lld , l_inode_num = %lld\n" ,parent_original_size , h_inodes->l_inode_num );
+			//MAHA_AARSH_VERSION_end
 			////////////////////////////////////////////////////////////////////////////////////////////////////////
 			//Saving info about range of blocks corresponding which 
 			//static snapshot has to be maintained in child 
@@ -2752,11 +2776,23 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 				crx.start = (u32)(h_inodes->range[j].start);
                                 crx.end = (u32)(h_inodes->range[j].end);
 				crx.snap_behavior = (u16)h_inodes->range[j].snapx_behavior;
+				
+				//MAHA_AARSH_START
+				if(crx.snap_behavior == SNAPX_FLAG_SEE_TH_RO){
+					is_see_thru = 1;
+				}
+				//MAHA_AARSH_END
+				
                                 printk("scorw set xattr: range: %d, %d:%d:%d\n",j, crx.start,
                                                                             crx.end, crx.snap_behavior);
 				ext4_xattr_set(c_inode, 1, scorw_range_name , &crx, sizeof(struct child_range_xattr), 0);
 		                #endif	
 			}
+			//MAHA_AARSH_START
+			ext4_xattr_set(c_inode , 1 , see_thru_ro , &(is_see_thru) , sizeof(int) , 0);
+			ext4_xattr_set(p_inode , 1 , see_thru_ro , &(is_see_thru) , sizeof(int) , 0);
+			//MAHA_AARSH_END
+		
 		}
 		else
 		{

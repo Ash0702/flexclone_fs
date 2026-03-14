@@ -106,6 +106,7 @@ struct helper_inodes
 {
         unsigned long p_inode_num;  //parent's inode number
         unsigned long f_inode_num;  //friend's inode number
+	unsigned long l_inode_num;  //log's inode number
         int num_ranges;             //how many ranges to store corresponding a child? 
         struct child_range range[MAX_RANGES_SUPPORTED];
 };

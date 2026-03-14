@@ -90,13 +90,6 @@ struct scorw_inode
 	//number of threads using this inode.
 	atomic64_t i_thread_usage_count;
 
-	// HAMARA CODE START //
-	// current version number of parent
-	unsigned long i_par_version;
-	// current version number of child
-	unsigned long i_child_version;
-	// HAMARA CODE END //
-
 	//vfs inode this inode corresponds to
 	struct inode *i_vfs_inode;
 
@@ -164,7 +157,9 @@ struct scorw_inode
 	int is_see_thru_ro;
 	int version; //stores parent version for parent and child version for child
 	struct scorw_version_start_end versions[MAX_VERSIONS];
-
+	struct inode *i_log_vfs_inode;
+	unsigned long orig_size; //TODO : look at this
+	
 	///MAHA_VERSION_AARSH_end	
 };
 
@@ -344,11 +339,13 @@ void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_nu
 
 //MAHA_VERSION_AARSH_start
 loff_t scorw_write_see_thru_ro(struct file *file,struct iov_iter *i, loff_t pos);
+void write_offset_log(struct inode* l_inode , loff_t offset , int len ,void* ptr);
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos, loff_t dest_pos, size_t len);
 unsigned long scorw_get_curr_version_attr_val(struct inode *inode);
 void scorw_set_curr_version_attr_val(struct inode *inode , unsigned long val /*Value to be set*/);
 unsigned long scorw_get_original_parent_size(struct inode * p_inode);
 int update_version(struct inode* c_inode);
+unsigned long scorw_get_log_attr_val(struct inode *inode);
 //MAHA_VERSION_AARSH_end
 #endif
 

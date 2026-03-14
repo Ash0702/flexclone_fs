@@ -62,6 +62,8 @@ char *version = "v";
 //MAHA_AARSH_VERSION_start
 char *curr_version = "curr_version";
 char *par_org = "PAR_ORGY";
+char *see_thru_ro = "SEE_THRU_RO";
+char *scorw_log = "SCORW_LOG";
 //MAHA_AARSH_VERSION_end
 unsigned long scorw_get_process_usage_count(struct scorw_inode *scorw_inode);
 static int scorw_is_in_range(struct scorw_inode *scorw_inode, unsigned blk_num);
@@ -410,6 +412,42 @@ unsigned long scorw_get_friend_attr_val(struct inode *inode)
         return 0;
 }
 
+//MAHA_AARSH_Start
+
+int scorw_get_see_thru_attr_val(struct inode *inode)
+{
+        int is_see_thru_ro;
+        int buf_size;
+
+        //printk("Inside scorw_get_friend_attr_val\n"); 
+        buf_size = ext4_xattr_get(inode, 1, see_thru_ro , &is_see_thru_ro, sizeof(unsigned long));
+        if(buf_size > 0)
+        {
+                //printk("Returning from scorw_get_friend_attr_val\n");
+                return is_see_thru_ro;
+        }
+        //printk("Returning from scorw_get_friend_attr_val\n");
+        return 0;
+}
+
+
+unsigned long scorw_get_log_attr_val(struct inode *inode)
+{
+        unsigned long log_ino_num;
+        int buf_size;
+
+        //printk("Inside scorw_get_friend_attr_val\n"); 
+        buf_size = ext4_xattr_get(inode, 1, scorw_log , &log_ino_num, sizeof(unsigned long));
+        if(buf_size > 0)
+        {
+                //printk("Returning from scorw_get_friend_attr_val\n");
+                return log_ino_num;
+        }
+        //printk("Returning from scorw_get_friend_attr_val\n");
+        return 0;
+}
+//MAHA_AARSH_End
+
 
 void special_open(struct inode *par_inode, struct inode *child_inode, int index)
 {
@@ -582,17 +620,28 @@ unsigned long scorw_get_original_parent_size(struct inode * p_inode){
 
 int update_version(struct inode * c_inode){
 
-	struct scorw_inode * scorw_c_inode = NULL;
+	struct scorw_inode * scorw_c_inode = NULL , *scorw_p_inode = NULL;
 	struct inode* p_inode = NULL;
-	unsigned long curr_par_size , org_par_size , updated_version;	
-
+//	unsigned long curr_par_size , org_par_size , updated_version;	
+	unsigned long curr_p_version;
 
 	if(!scorw_is_child_file(c_inode , 0)){
 		return -1; // not child
 	}	
 	scorw_c_inode = scorw_find_inode(c_inode);
 	p_inode = scorw_c_inode->i_par_vfs_inode;
+	//scorw_p_inode = p_inode->i_scorw_inode;    // Doesnt work coz to fill these values we would have to call scorw_prepare_par_inode
+	//scorw_p_inode = scorw_find_inode(p_inode); // Doesnt work
+	curr_p_version = scorw_get_curr_version_attr_val(p_inode); // TODO : this also atomically
 	
+	if(! (c_inode && p_inode && scorw_c_inode) ){
+		printk("c_inode:%d ; p_inode:%d : curr_p_version:%ld : scorw_c_inode:%d\n" , c_inode , p_inode , curr_p_version , scorw_c_inode);
+		BUG_ON(1);
+		return 1;
+	}	
+	scorw_c_inode->version = (curr_p_version); //TODO : update this atomically
+	printk("Updated c_inode = %d\n" , scorw_c_inode->version);
+/*	// OLD CODE
 	org_par_size = scorw_get_original_parent_size(p_inode);
 	curr_par_size = i_size_read(p_inode); 
 	updated_version = curr_par_size/org_par_size;
@@ -600,6 +649,7 @@ int update_version(struct inode * c_inode){
 	printk("upd_version = %ld , curr_par_size = %ld , org_par_size = %ld\n" , updated_version , curr_par_size , org_par_size);
 
 	scorw_set_curr_version_attr_val(c_inode , updated_version);
+*/
 	return 0;
 }
 
@@ -1061,7 +1111,7 @@ ret:
         return retval;
 }
 
-
+// MAHA_AARSH_Start
 void scorw_prepare_child_inode(struct scorw_inode *scorw_inode, struct inode *vfs_inode, int new_sparse)
 {
 	int i = 0;
@@ -1069,10 +1119,12 @@ void scorw_prepare_child_inode(struct scorw_inode *scorw_inode, struct inode *vf
 	int first_write_done = 0;
 	unsigned long p_ino_num = 0;
 	unsigned long f_ino_num = 0;
+	unsigned long log_ino_num = 0;
 	unsigned temp_hash_table_size = 0;
 	unsigned long child_version_val = 0;
 	unsigned long frnd_version_val = 0;
-
+	int curr_version = 1;
+	
 	//printk("1.Inside scorw_prepare_child_inode\n");
 
 	p_ino_num = scorw_get_parent_attr_val(vfs_inode);
@@ -1081,6 +1133,10 @@ void scorw_prepare_child_inode(struct scorw_inode *scorw_inode, struct inode *vf
 	f_ino_num = scorw_get_friend_attr_val(vfs_inode);
 	BUG_ON(f_ino_num == 0);
 
+	curr_version = scorw_get_curr_version_attr_val(vfs_inode);
+        BUG_ON(curr_version == 0);
+	
+	scorw_inode->version = curr_version;
 	scorw_inode->i_ino_num = vfs_inode->i_ino;
 	//atomic64_set((&(scorw_inode->i_process_usage_count)), 0);
 	scorw_inode->i_process_usage_count = 0;
@@ -1262,14 +1318,31 @@ void scorw_free_inode(struct scorw_inode *scorw_inode)
 		return kfree(scorw_inode);
 }
 
+// MAHA_AARSH_Start
 void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_inode)
 {
         int i = 0;
         //unsigned long c_ino_num = 0;
         //struct scorw_inode *c_inode = 0;
+	unsigned long log_ino_num = 0;
+	int curr_version = 1;	
+	unsigned long orig_size = 0;
+	int is_see_thru_ro = 0;
+	
+	is_see_thru_ro = scorw_get_see_thru_attr_val(vfs_inode);
+	BUG_ON(is_see_thru_ro == -1);
 
-        //printk("Inside scorw_prepare_par_inode\n");
+	log_ino_num = scorw_get_log_attr_val(vfs_inode);
+        BUG_ON(log_ino_num == 0);
 
+	curr_version = scorw_get_curr_version_attr_val(vfs_inode);
+	BUG_ON(curr_version == 0);
+	
+	orig_size = scorw_get_original_parent_size(vfs_inode);
+        BUG_ON(orig_size == 0);
+	//printk("Inside scorw_prepare_par_inode\n");
+	scorw_inode->is_see_thru_ro = is_see_thru_ro;	
+	scorw_inode->version = curr_version;
         scorw_inode->i_ino_num = vfs_inode->i_ino;
         //atomic64_set((&(scorw_inode->i_process_usage_count)), 0);
         scorw_inode->i_process_usage_count = 0;
@@ -1279,7 +1352,8 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
         //printk("scorw_prepare_par_inode: inode num: %lu, inode ref count value: %u (After iget, is parent)\n", scorw_inode->i_ino_num, vfs_inode->i_count);
         scorw_inode->i_par_vfs_inode = NULL;
         scorw_inode->i_frnd_vfs_inode = NULL;
-        scorw_inode->i_copy_size = 0;
+        scorw_inode->i_log_vfs_inode = ext4_iget(vfs_inode->i_sb, log_ino_num, EXT4_IGET_NORMAL); //Loads the i_log_vfs_inode into the parent...
+	scorw_inode->i_copy_size = 0;
         scorw_inode->i_ino_unlinked = 0;
         scorw_inode->i_at_index = -1;
         scorw_inode->i_num_ranges = 0;
@@ -1288,6 +1362,7 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
                 scorw_inode->i_range[i].start = -1;
                 scorw_inode->i_range[i].end = -1;
         }
+
 }
 
 //return 1 if child inode
@@ -1452,6 +1527,12 @@ int scorw_put_inode(struct inode *inode, int is_child_inode, int is_thread_putti
         //scorw_inode = scorw_search_inode_list(inode->i_ino);
 	//read_unlock(&scorw_lock);
 	scorw_inode = inode->i_scorw_inode;
+	
+	//MAHA_AARSH_VERSION_start
+	//save the version into xattr
+	ext4_xattr_set(inode , 1 , curr_version  , &(scorw_inode->version) , sizeof(int) , 0 ); //TODO put locks here
+
+	//MAHA_AARSH_VERSION_start
 
 	//scorw_put_inode of child corresponding par's scorw_get_inode has been already done
 	//in unlink child function. So, don't do it again.
@@ -2102,13 +2183,15 @@ ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *io
 	
 	par_curr_size = i_size_read(p_inode);
 	par_orig_size = scorw_get_original_parent_size(p_inode);
-	
-	curr_version = scorw_get_curr_version_attr_val(c_inode);
+	//par_orig_size = scorw_inode->orig_size;	
+	//curr_version = scorw_get_curr_version_attr_val(c_inode);
+	curr_version = scorw_inode->version;
 	if(curr_version < 1){ // this means we are reading for the first time , so we need to persist it as well
 		printk("first read from child : %d\n" , curr_version);
 		scorw_set_curr_version_attr_val(c_inode , 1);
 		curr_version = 1;
 	}
+        printk("par_curr_size:%lld , par_orig_size:%lld , curr_version:%lld", par_curr_size,par_orig_size,curr_version);
 
 	iocb->ki_pos = (curr_version - 1) * par_orig_size;
 	to->count = par_orig_size;
@@ -4127,13 +4210,16 @@ void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_nu
 
 
 //MAHA_AARSH_start //
-
+// File will always be a parent file;
 loff_t scorw_write_see_thru_ro(struct file *file ,struct iov_iter* i , loff_t pos)
 {
     struct inode *inode = file->f_mapping->host;
     long long original_size;
     loff_t current_size = i_size_read(inode);
     loff_t src_offset, dest_offset;
+    struct scorw_inode *p_inode = inode->i_scorw_inode; // Get the scorw_inode
+    struct inode *l_inode = p_inode->i_log_vfs_inode;
+    BUG_ON(scorw_is_child_file(inode , 0));
 
     // 1. Fetch the persistent block size from Extended Attributes on disk
     original_size = scorw_get_original_parent_size(inode);
@@ -4162,7 +4248,14 @@ loff_t scorw_write_see_thru_ro(struct file *file ,struct iov_iter* i , loff_t po
         src_offset = current_size - original_size;
         dest_offset = current_size;
     }
+	
+    printk("curr_version = %d" , p_inode->version);
+    printk("...Updating...");
+    __sync_fetch_and_add(&(p_inode->version) , 1);
+    printk("curr_version = %d\n" , p_inode->version);
 
+    write_offset_log(l_inode , 0 , sizeof(int) , &(p_inode->version));
+    
     // 4. Create the new version block
     if (scorw_internal_copy_blocks(file, src_offset, dest_offset, original_size) < 0) {
         printk(KERN_ERR "scorw: Failed to copy blocks for new version\n");
@@ -4177,6 +4270,94 @@ loff_t scorw_write_see_thru_ro(struct file *file ,struct iov_iter* i , loff_t po
 
     return pos;
 }
+
+//1. This takes in struct inode* as opposed to struct scorw_inode* while writing to frnd file
+//2. Kindly ensure that the write takes place in one block , else problems
+void write_offset_log(struct inode *l_inode ,loff_t offset , int len, void* ptr){
+	
+	struct page* page = NULL;
+	char* kaddr = NULL;
+	int ret = 0;
+	int buff_size = 50;
+	char buff[50];
+	loff_t new_size;
+	if(!ptr){
+		printk("Passed Null pointer in ptr in %s\n" , __func__);
+		return;
+	}
+	//struct address_space *mapping = inode->i_mapping;
+	sprintf(buff , "curr_par_version=%d\n" , (*(int *)ptr ) );
+	//printk("scorw_set_block_copied called\n");
+	
+
+	page = scorw_get_page(l_inode, (offset/PAGE_BYTES));
+	if(page == NULL)
+	{
+		printk(KERN_ERR "Failed to get page\n");
+	}
+
+	//printk("%s(): page: %u obtained. Has buffers? %d\n", __func__, (blk_num/PAGE_BLOCKS), page_has_buffers(page));
+	//new start
+	if(!page_has_buffers(page))
+	{
+		//printk("%s(): page: %u doesn't have buffers\n", __func__, (blk_num/PAGE_BLOCKS));
+		lock_page(page);
+		// In case writeback began while the page was unlocked 
+		wait_for_stable_page(page);
+
+		//needed to create buffer heads and fill them with physical addresses
+		//will be needed during writeback
+		//Don't perform read operation, so, passed PAGE_SIZE as length
+		ret = __block_write_begin(page_folio(page), page->index << PAGE_SHIFT, PAGE_SIZE, ext4_da_get_block_prep);
+		if(ret < 0)
+		{
+			unlock_page(page);
+			scorw_put_page(page);
+			printk("%s(): Error inside __block_write_begin\n", __func__);
+			BUG_ON(ret<0);
+		}
+
+		unlock_page(page);
+	}
+	//new end
+
+
+	kaddr = kmap_atomic(page);
+	memcpy(kaddr + offset , buff , buff_size);
+	printk("Performed memcpy on log_file and wrote the int |%s| in log_file %ld\n" , buff , l_inode->i_ino );
+	kunmap_atomic(kaddr);
+
+	if(!PageDirty(page))
+	{
+		//printk("%s(): page: %u is not dirty. Setting it dirty.\n", __func__, page->index);
+		lock_page(page);
+		scorw_set_page_dirty(page);
+		unlock_page(page);
+	}
+
+	scorw_put_page(page);
+	
+	// --- ADD THIS TO FIX 'CAT' ---
+        
+        // 1. Calculate the new end of the file
+        new_size = offset + buff_size;
+
+        // 2. Check if we actually grew the file past its current known size
+        if (new_size > i_size_read(l_inode)) {
+                
+                // 3. Update the in-memory inode size safely
+                i_size_write(l_inode, new_size);
+                
+                // 4. Mark the inode dirty so the new size is written to disk
+                mark_inode_dirty(l_inode);
+                
+                printk("scorw: Updated log file size to %lld bytes\n", new_size);
+        }
+}
+
+
+
+
 //MAHA_AARSH_end //
 
 
