@@ -618,41 +618,33 @@ unsigned long scorw_get_original_parent_size(struct inode * p_inode){
 
 }
 
-int update_version(struct inode * c_inode){
+int update_version(struct inode *c_inode){
+    struct scorw_inode *sci = scorw_find_inode(c_inode);
+    struct inode *p_inode_live;
+    unsigned long old_v, new_v;
 
-	struct scorw_inode * scorw_c_inode = NULL , *scorw_p_inode = NULL;
-	struct inode* p_inode = NULL;
-//	unsigned long curr_par_size , org_par_size , updated_version;	
-	unsigned long curr_p_version;
+    if (!sci) return -EINVAL;
 
-	if(!scorw_is_child_file(c_inode , 0)){
-		return -1; // not child
-	}	
-	scorw_c_inode = scorw_find_inode(c_inode);
-	p_inode = scorw_c_inode->i_par_vfs_inode;
-	//scorw_p_inode = p_inode->i_scorw_inode;    // Doesnt work coz to fill these values we would have to call scorw_prepare_par_inode
-	//scorw_p_inode = scorw_find_inode(p_inode); // Doesnt work
-	curr_p_version = scorw_get_curr_version_attr_val(p_inode); // TODO : this also atomically
-	
-	if(! (c_inode && p_inode && scorw_c_inode) ){
-		printk("c_inode:%d ; p_inode:%d : curr_p_version:%ld : scorw_c_inode:%d\n" , c_inode , p_inode , curr_p_version , scorw_c_inode);
-		BUG_ON(1);
-		return 1;
-	}	
-	scorw_c_inode->version = (curr_p_version); //TODO : update this atomically
-	printk("Updated c_inode = %d\n" , scorw_c_inode->version);
-/*	// OLD CODE
-	org_par_size = scorw_get_original_parent_size(p_inode);
-	curr_par_size = i_size_read(p_inode); 
-	updated_version = curr_par_size/org_par_size;
+    if (sci->i_par_vfs_inode == NULL) {
+        printk("SCORW_DEBUG: Update failed - Child has no Parent link.\n");
+        return -ENOENT;
+    }
 
-	printk("upd_version = %ld , curr_par_size = %ld , org_par_size = %ld\n" , updated_version , curr_par_size , org_par_size);
+    p_inode_live = sci->i_par_vfs_inode;
+    old_v = sci->version;
+    new_v = scorw_get_curr_version_attr_val(p_inode_live);
+    
+    sci->version = new_v;
+	scorw_set_curr_version_attr_val(c_inode, new_v);
+    // Safety net: Just in case Ext4 put metadata in the child's mapping.
+    // Since the data is in the parent, this takes 0.001ms because it's already empty.
+    //truncate_inode_pages(c_inode->i_mapping, 0); 
 
-	scorw_set_curr_version_attr_val(c_inode , updated_version);
-*/
-	return 0;
+    printk("SCORW_DEBUG: IOCTL UPDATE. Child %lu: V%lu -> V%lu. Fast Sync complete.\n", 
+            c_inode->i_ino, old_v, new_v);
+    
+    return 0;
 }
-
 //MAHA_AARSH_end
 
 
@@ -1284,6 +1276,9 @@ void scorw_prepare_child_inode(struct scorw_inode *scorw_inode, struct inode *vf
 	scorw_inode->i_par_vfs_inode->scorw_page_cache_hits = 0;
 	scorw_inode->i_par_vfs_inode->scorw_page_cache_misses = 0;
 	//debugging end
+	//MAHA_AARSH_start
+	//scorw_init_ram_and_log(vfs_inode, scorw_inode);
+	//MAHA_AARSH_end
 }
 //add an scorw inode into list of scorw inode's
 void scorw_add_inode_list(struct scorw_inode *scorw_inode)
@@ -1362,6 +1357,15 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
                 scorw_inode->i_range[i].start = -1;
                 scorw_inode->i_range[i].end = -1;
         }
+	printk("SCORW_DEBUG: Inode %lu (Address: %p) - Init Flag is: %d\n",
+       vfs_inode->i_ino, scorw_inode, scorw_inode->is_log_initialized);
+		if (!IS_ERR(scorw_inode->i_log_vfs_inode)) {
+			if(scorw_inode->is_log_initialized == false)
+			{
+				scorw_replay_log(scorw_inode);
+				scorw_inode->is_log_initialized = true;
+			}
+		}
 
 }
 
@@ -2146,71 +2150,57 @@ ssize_t scorw_read_from_child(struct kiocb *iocb, struct iov_iter *to, unsigned 
 
 //MAHA_AARSH_start
 //Serve request from parent's page cache
-ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *iocb, struct iov_iter *to, unsigned batch_start_blk, unsigned batch_end_blk)
+ssize_t scorw_read_from_parent(struct scorw_inode *s_inode, struct kiocb *iocb, struct iov_iter *to, unsigned b_start, unsigned b_end)
 {
-	ssize_t ret = 0;
-	size_t old_to_count = 0;
-	size_t expected_to_count = 0;
-	loff_t start = 0;
-	loff_t end = 0;
-	struct inode *c_inode;
-	struct inode *p_inode;  	//owner inode of inode on which read operation is being done
-	struct address_space *mapping;  //original address space mapping of vfs inode on which read is being done.
-	unsigned long par_curr_size = 0 , par_orig_size = 0 , curr_version = 0;
+    unsigned long target_phys_blk;
+    loff_t orig_pos = iocb->ki_pos;
+    ssize_t ret;
+    loff_t logical_size;
+    struct inode *read_inode;
+    size_t orig_count = iov_iter_count(to);
+    size_t max_read, bytes_to_page_end;
 
-	//printk("scorw_read_from_parent: reading using parent's page cache\n");
-	//save original mapping 
-	mapping = iocb->ki_filp->f_mapping;
+    if (s_inode->i_par_vfs_inode) 
+        read_inode = s_inode->i_par_vfs_inode;
+    else 
+        read_inode = s_inode->i_vfs_inode;
 
-	//change mapping
-	p_inode = scorw_inode->i_par_vfs_inode;
-	iocb->ki_filp->f_mapping = p_inode->i_mapping;
-	
-	//set child_inode
-	c_inode = scorw_inode->i_vfs_inode;
-	
-	old_to_count = to->count;
-	start = iocb->ki_pos;
-	end = scorw_min((iocb->ki_pos + to->count), ((unsigned long long)batch_end_blk << PAGE_SHIFT));
-	to->count = end - start;	//read these many bytes
-	expected_to_count = to->count;
-	//printk("[pid: %d] %s(), batch_end_blk: %u, old_to_count: %lu, start: %lu, end: %lu, iocb->ki_pos: %lu, to->count: %lu\n", current->pid, __func__, batch_end_blk, old_to_count, start, end, iocb->ki_pos, to->count);
+    logical_size = scorw_get_original_parent_size(read_inode);
 
-	//read data from parents page cache and fill buffer
-	//Note: internally, in functions s.a. ext4_readpage, ext4_mpage_readpages,
-	//inode to which page belongs to is found using page->mapping->host.
-	//Hence, if there is miss in page cache of parent, parents extents will be used to read this page.  
-	
-	par_curr_size = i_size_read(p_inode);
-	par_orig_size = scorw_get_original_parent_size(p_inode);
-	//par_orig_size = scorw_inode->orig_size;	
-	//curr_version = scorw_get_curr_version_attr_val(c_inode);
-	curr_version = scorw_inode->version;
-	if(curr_version < 1){ // this means we are reading for the first time , so we need to persist it as well
-		printk("first read from child : %d\n" , curr_version);
-		scorw_set_curr_version_attr_val(c_inode , 1);
-		curr_version = 1;
-	}
-        printk("par_curr_size:%lld , par_orig_size:%lld , curr_version:%lld", par_curr_size,par_orig_size,curr_version);
+    // 1. CLAMP EOF: Stop reading past the original logical file size
+    if (orig_pos >= logical_size) {
+        return 0; // EOF
+    }
 
-	iocb->ki_pos = (curr_version - 1) * par_orig_size;
-	to->count = par_orig_size;
+    max_read = logical_size - orig_pos;
+    if (orig_count > max_read) {
+        iov_iter_truncate(to, max_read);
+        orig_count = max_read;
+    }
 
-	ret = generic_file_read_iter(iocb, to);
-	//printk("[pid: %d] %s(), read %ld bytes\n", current->pid, __func__, ret);
-	//BUG_ON(ret < 0);
-	if(ret > 0)
-	{
-		to->count = old_to_count - ret;
-	}
+    // 2. CLAMP BLOCK BOUNDARY: Force kernel to read one block at a time
+    // This ensures we never miss a Time Machine redirect that happens halfway through a read
+    bytes_to_page_end = PAGE_SIZE - (orig_pos & (PAGE_SIZE - 1));
+    if (orig_count > bytes_to_page_end) {
+        iov_iter_truncate(to, bytes_to_page_end);
+    }
 
+    // 3. TIME MACHINE LOOKUP
+    target_phys_blk = scorw_lookup_physical_block(s_inode, orig_pos / PAGE_SIZE);
 
-	//printk("[pid: %d] %s(), updated to->count: %lu after read\n", current->pid, __func__, to->count);
+    if (target_phys_blk != 0) {
+        // MATCH: Shift offset to the CoW block in the Parent's memory
+        iocb->ki_pos = (loff_t)(target_phys_blk * PAGE_SIZE) + (orig_pos & (PAGE_SIZE - 1));
+        
+        ret = generic_file_read_iter(iocb, to);
+        
+        // Restore logical position
+        iocb->ki_pos = orig_pos + ret; 
+        return ret;
+    }
 
-	//restore original page cache mapping 
-	iocb->ki_filp->f_mapping = mapping;
-
-	return ret;
+    // NO MATCH: Read baseline block from Parent's memory
+    return generic_file_read_iter(iocb, to);
 }
 //MAHA_AARSH_end
 
@@ -4211,153 +4201,310 @@ void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_nu
 
 //MAHA_AARSH_start //
 // File will always be a parent file;
-loff_t scorw_write_see_thru_ro(struct file *file ,struct iov_iter* i , loff_t pos)
+loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos)
 {
     struct inode *inode = file->f_mapping->host;
-    long long original_size;
-    loff_t current_size = i_size_read(inode);
-    loff_t src_offset, dest_offset;
-    struct scorw_inode *p_inode = inode->i_scorw_inode; // Get the scorw_inode
-    struct inode *l_inode = p_inode->i_log_vfs_inode;
-    BUG_ON(scorw_is_child_file(inode , 0));
+    struct scorw_inode *p_inode = scorw_find_inode(inode);
+    unsigned long target_logical_blk = pos / PAGE_SIZE;
+    unsigned long appended_ext4_blk;
+    loff_t append_pos;
 
-    // 1. Fetch the persistent block size from Extended Attributes on disk
-    original_size = scorw_get_original_parent_size(inode);
+    if (!p_inode) return pos;
 
-    // 2. If it's 0, this is the very FIRST see-thru write!
-    if (original_size <= 0) {
-        // Round up to nearest block (4KB)
-        original_size = (current_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        if (original_size == 0) {
-            original_size = PAGE_SIZE; // Fallback if file was totally empty
-        }
-        
-        // PERSIST IT: Save it to disk so it survives close() and reboots!
-        ext4_xattr_set(inode, 1, par_org, &original_size, sizeof(long long), 0);
+    // 1. Calculate and Copy
+    append_pos = (i_size_read(inode) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    appended_ext4_blk = append_pos / PAGE_SIZE;
+
+    if (scorw_internal_copy_blocks(file, target_logical_blk * PAGE_SIZE, append_pos, PAGE_SIZE) < 0) {
+        return pos;
     }
 
-    // Align current_size to 4KB blocks just to be safe
-    current_size = (current_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    // 2. Increment and PERSIST
+    __sync_fetch_and_add(&(p_inode->version), 1);
+    scorw_set_curr_version_attr_val(inode, p_inode->version); // UPDATE DISK XATTR
 
-    // 3. Dynamic Offset Math (No arrays needed!)
-    // The latest version is ALWAYS the last 'original_size' chunk of the file.
-    if (current_size <= original_size) {
-        src_offset = 0;
-        dest_offset = original_size;
-    } else {
-        src_offset = current_size - original_size;
-        dest_offset = current_size;
-    }
-	
-    printk("curr_version = %d" , p_inode->version);
-    printk("...Updating...");
-    __sync_fetch_and_add(&(p_inode->version) , 1);
-    printk("curr_version = %d\n" , p_inode->version);
+    // 3. Log it
+    scorw_record_write(p_inode, target_logical_blk, appended_ext4_blk, 1);
 
-    write_offset_log(l_inode , 0 , sizeof(int) , &(p_inode->version));
-    
-    // 4. Create the new version block
-    if (scorw_internal_copy_blocks(file, src_offset, dest_offset, original_size) < 0) {
-        printk(KERN_ERR "scorw: Failed to copy blocks for new version\n");
-        return -EIO;
-    }
+    printk("SCORW_DEBUG: WRITE PARENT. Inode: %lu, New Version: %d, Blk: %lu -> Phys: %lu\n", 
+            inode->i_ino, p_inode->version, target_logical_blk, appended_ext4_blk);
 
-    // 5. Shift the write offset
-    // The modulo arithmetic here is magic: Whether the user writes at offset 0 
-    // or does an append write at the physical end-of-file, this math perfectly 
-    // maps them to the exact start of the newly created version block!
-    pos = (pos % original_size) + dest_offset;
-
-    return pos;
+    return append_pos + (pos % PAGE_SIZE);
 }
-
 //1. This takes in struct inode* as opposed to struct scorw_inode* while writing to frnd file
 //2. Kindly ensure that the write takes place in one block , else problems
-void write_offset_log(struct inode *l_inode ,loff_t offset , int len, void* ptr){
-	
-	struct page* page = NULL;
-	char* kaddr = NULL;
-	int ret = 0;
-	int buff_size = 50;
-	char buff[50];
-	loff_t new_size;
-	if(!ptr){
-		printk("Passed Null pointer in ptr in %s\n" , __func__);
-		return;
-	}
-	//struct address_space *mapping = inode->i_mapping;
-	sprintf(buff , "curr_par_version=%d\n" , (*(int *)ptr ) );
-	//printk("scorw_set_block_copied called\n");
-	
+// 1. Change the parameters to accept our binary struct and its size
+void write_offset_log(struct inode *l_inode, loff_t offset, int len, void* ptr) 
+{
+    struct page* page = NULL;
+    char* kaddr = NULL;
+    int ret = 0;
+    loff_t new_size;
 
-	page = scorw_get_page(l_inode, (offset/PAGE_BYTES));
-	if(page == NULL)
-	{
-		printk(KERN_ERR "Failed to get page\n");
-	}
+    if(!ptr) {
+        printk(KERN_ERR "Passed Null pointer in ptr in %s\n", __func__);
+        return;
+    }
 
-	//printk("%s(): page: %u obtained. Has buffers? %d\n", __func__, (blk_num/PAGE_BLOCKS), page_has_buffers(page));
-	//new start
-	if(!page_has_buffers(page))
-	{
-		//printk("%s(): page: %u doesn't have buffers\n", __func__, (blk_num/PAGE_BLOCKS));
-		lock_page(page);
-		// In case writeback began while the page was unlocked 
-		wait_for_stable_page(page);
+    page = scorw_get_page(l_inode, (offset/PAGE_BYTES));
+    if(page == NULL) {
+        printk(KERN_ERR "Failed to get page\n");
+        return;
+    }
 
-		//needed to create buffer heads and fill them with physical addresses
-		//will be needed during writeback
-		//Don't perform read operation, so, passed PAGE_SIZE as length
-		ret = __block_write_begin(page_folio(page), page->index << PAGE_SHIFT, PAGE_SIZE, ext4_da_get_block_prep);
-		if(ret < 0)
-		{
-			unlock_page(page);
-			scorw_put_page(page);
-			printk("%s(): Error inside __block_write_begin\n", __func__);
-			BUG_ON(ret<0);
-		}
+    if(!page_has_buffers(page)) {
+        lock_page(page);
+        wait_for_stable_page(page);
+        ret = __block_write_begin(page_folio(page), page->index << PAGE_SHIFT, PAGE_SIZE, ext4_da_get_block_prep);
+        if(ret < 0) {
+            unlock_page(page);
+            scorw_put_page(page);
+            BUG_ON(ret<0);
+        }
+        unlock_page(page);
+    }
 
-		unlock_page(page);
-	}
-	//new end
+    kaddr = kmap_atomic(page);
+    
+    // HAMARA FIX: We just copy the raw binary bytes of the struct directly!
+    // No sprintf needed. This is lightning fast.
+    memcpy(kaddr + (offset % PAGE_SIZE), ptr, len); 
+    
+    kunmap_atomic(kaddr);
 
+    if(!PageDirty(page)) {
+        lock_page(page);
+        scorw_set_page_dirty(page);
+        unlock_page(page);
+    }
+    scorw_put_page(page);
+    
+    // Update EOF (Your existing logic)
+    new_size = offset + len;
+    if (new_size > i_size_read(l_inode)) {
+        i_size_write(l_inode, new_size);
+        mark_inode_dirty(l_inode);
+    }
+}
 
-	kaddr = kmap_atomic(page);
-	memcpy(kaddr + offset , buff , buff_size);
-	printk("Performed memcpy on log_file and wrote the int |%s| in log_file %ld\n" , buff , l_inode->i_ino );
-	kunmap_atomic(kaddr);
-
-	if(!PageDirty(page))
-	{
-		//printk("%s(): page: %u is not dirty. Setting it dirty.\n", __func__, page->index);
-		lock_page(page);
-		scorw_set_page_dirty(page);
-		unlock_page(page);
-	}
-
-	scorw_put_page(page);
-	
-	// --- ADD THIS TO FIX 'CAT' ---
+void scorw_cleanup_versions(struct scorw_inode *s_inode)
+{
+        int i;
+        // Destroy all XArrays and free the structs
+        for (i = 0; i < MAX_VERSIONS; i++) {
+                if (s_inode->version_states[i] != NULL) {
+                        xa_destroy(&s_inode->version_states[i]->delta_map);
+                        kfree(s_inode->version_states[i]);
+                        s_inode->version_states[i] = NULL;
+                }
+        }
         
-        // 1. Calculate the new end of the file
-        new_size = offset + buff_size;
-
-        // 2. Check if we actually grew the file past its current known size
-        if (new_size > i_size_read(l_inode)) {
-                
-                // 3. Update the in-memory inode size safely
-                i_size_write(l_inode, new_size);
-                
-                // 4. Mark the inode dirty so the new size is written to disk
-                mark_inode_dirty(l_inode);
-                
-                printk("scorw: Updated log file size to %lld bytes\n", new_size);
+        // Release the Log File inode so Ext4 can clean it up
+        if (s_inode->i_log_vfs_inode != NULL) {
+                iput(s_inode->i_log_vfs_inode);
+                s_inode->i_log_vfs_inode = NULL;
         }
 }
 
+struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num) 
+{
+        int idx = v_num - 1;
+        struct scorw_version *new_v;
+        
+        if (idx < 0 || idx >= MAX_VERSIONS) return NULL;
+        if (s_inode->version_states[idx] != NULL) return s_inode->version_states[idx]; // Already exists
 
+        new_v = kzalloc(sizeof(struct scorw_version), GFP_KERNEL);
+        if (!new_v) return NULL;
 
+        new_v->version_num = v_num;
+        
+        // Initialize the lockless Radix Tree for this specific version!
+        xa_init(&new_v->delta_map);
 
+        // Link it backwards in time to build the "Time Machine"
+        if (idx > 0) {
+                new_v->parent = scorw_get_or_create_version(s_inode, v_num - 1);
+        } else {
+                new_v->parent = NULL;
+        }
+
+        s_inode->version_states[idx] = new_v;
+        return new_v;
+}
+
+void scorw_replay_log(struct scorw_inode *s_inode) 
+{
+        struct inode *log_inode = s_inode->i_log_vfs_inode;
+        loff_t log_size, offset = 0;
+        struct page *page;
+        char *kaddr;
+        struct scorw_log_record *record;
+        struct scorw_version *v;
+        int i;
+
+        if (!log_inode) return; // No log file exists yet!
+
+        log_size = i_size_read(log_inode);
+		printk("Replaying log file\n");
+        // Read the log file page by page
+        while (offset < log_size) {
+                pgoff_t index = offset >> PAGE_SHIFT;
+                unsigned int page_offset = offset & (PAGE_SIZE - 1);
+                unsigned int bytes_to_read = PAGE_SIZE - page_offset;
+
+                if (offset + bytes_to_read > log_size)
+                        bytes_to_read = log_size - offset;
+
+                // Grab the raw physical page from Ext4's mapping cache
+                page = read_mapping_page(log_inode->i_mapping, index, NULL);
+                if (IS_ERR(page)) {
+                        printk(KERN_ERR "SCORW: Failed to read log page!\n");
+                        break;
+                }
+
+                // Map the page into kernel RAM (just like your copy loop!)
+                kaddr = (char *)kmap_atomic(page);
+                record = (struct scorw_log_record *)(kaddr + page_offset);
+
+                // Loop through every 24-byte transaction record on this page
+                while (bytes_to_read >= sizeof(struct scorw_log_record)) {
+                        
+                        // Safety check to avoid garbage data
+                        if (record->version_num > 0) { 
+                                v = scorw_get_or_create_version(s_inode, record->version_num);
+                                if (v) {
+                                        // Store every block of this extent into the XArray!
+                                        for (i = 0; i < record->len_blks; i++) {
+                                                xa_store(&v->delta_map, 
+                                                         record->logical_start_blk + i,
+							xa_mk_value(record->physical_start_blk + i), 
+                                                         GFP_KERNEL);
+                                        }
+                                }
+                        }
+                        
+                        record++; // Move to the next 24-byte record
+                        bytes_to_read -= sizeof(struct scorw_log_record);
+                        offset += sizeof(struct scorw_log_record);
+                }
+
+                // Unmap and release the memory page so we don't leak RAM
+                kunmap_atomic(kaddr);
+                put_page(page); 
+        }
+}
+/*
+void scorw_init_ram_and_log(struct inode *inode, struct scorw_inode *s_inode) {
+    char log_name[64];
+    struct file *log_file;
+    struct dentry *dentry;
+    int ret;
+
+    if (!s_inode) return;
+
+    // 1. Get a dentry for this inode (vfs_getxattr needs a dentry)
+    dentry = d_find_alias(inode);
+    if (!dentry) {
+        printk("SCORW_DEBUG: HEAL FAIL - No dentry for Inode %lu\n", inode->i_ino);
+        return;
+    }
+
+    // 2. Fetch the log name directly from the xattr
+    // "user.scorw_log" is the attribute name you set in setxattr_generic
+    ret = vfs_getxattr(&nop_mnt_idmap, dentry, "user.scorw_log", log_name, 63);
+    
+    // We are done with the dentry reference
+    dput(dentry);
+
+    if (ret <= 0) {
+        printk("SCORW_DEBUG: HEAL FAIL - Log xattr not found on Inode %lu\n", inode->i_ino);
+        return;
+    }
+    log_name[ret] = '\0'; // Ensure string is null-terminated
+
+    printk("SCORW_DEBUG: HEAL - Found log path '%s'\n", log_name);
+
+    // 3. Open the log file using the absolute path from your script
+    log_file = filp_open(log_name, O_RDONLY, 0);
+    if (IS_ERR(log_file)) {
+        printk("SCORW_DEBUG: HEAL FAIL - Cannot open '%s' (Error %ld)\n", log_name, PTR_ERR(log_file));
+        return;
+    }
+
+    s_inode->i_log_vfs_inode = file_inode(log_file);
+    printk("SCORW_DEBUG: HEAL SUCCESS - Log Inode is %lu\n", s_inode->i_log_vfs_inode->i_ino);
+    
+    // 4. Fill the XArray
+    scorw_replay_log(s_inode);
+}
+	*/
+// Returns the Physical Block Number if modified, or '0' if it was never touched.
+unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk)
+{
+    struct scorw_inode *source = s_inode;
+    int v;
+
+    if (!s_inode) return 0;
+
+    if (s_inode->i_par_vfs_inode) {
+        source = scorw_find_inode(s_inode->i_par_vfs_inode);
+        if (!source) return 0;
+    }
+
+    for (v = s_inode->version; v >= 1; v--) {
+        struct scorw_version *sv = source->version_states[v - 1];
+        
+        if (sv) {
+            void *found_blk = xa_load(&sv->delta_map, target_logical_blk);
+
+            if (found_blk) /*return (unsigned long)found_blk*/ return xa_to_value(found_blk);
+        }
+    }
+
+    return 0;
+}
+
+int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len)
+{
+    struct scorw_version *active_v;
+    struct scorw_log_record record;
+    int i;
+
+    if (!s_inode) return -EINVAL;
+
+    // DEBUG: Let's see if we even enter the logger
+    printk("SCORW_DEBUG: Attempting to log write for Inode %lu. Target Version: %d\n", 
+            s_inode->i_vfs_inode->i_ino, s_inode->version);
+
+    // Ensure RAM state exists for the current parent version
+    active_v = scorw_get_or_create_version(s_inode, s_inode->version);
+    if (!active_v) {
+        printk("SCORW_DEBUG: CRITICAL - Failed to create RAM version %d\n", s_inode->version);
+        return -ENOMEM;
+    }
+
+    // Update XArray
+    for (i = 0; i < len; i++) {
+        xa_store(&active_v->delta_map, logical_blk + i, xa_mk_value(physical_blk + i), GFP_KERNEL);
+        printk("SCORW_DEBUG: XA_STORE: Logical %lu -> Physical %lu (V%d)\n", 
+                logical_blk + i, physical_blk + i, s_inode->version);
+    }
+
+    // Persist to Disk Log
+    if (s_inode->i_log_vfs_inode) {
+        record.version_num = s_inode->version;
+        record.logical_start_blk = logical_blk;
+        record.physical_start_blk = physical_blk;
+        record.len_blks = len;
+        record.padding = 0;
+
+        write_offset_log(s_inode->i_log_vfs_inode, i_size_read(s_inode->i_log_vfs_inode), 
+                         sizeof(record), &record);
+    }
+
+    return 0;
+}
 //MAHA_AARSH_end //
 
 

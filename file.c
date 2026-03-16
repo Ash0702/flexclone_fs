@@ -40,6 +40,8 @@
 ///////// scorw start //////////
 int scorw_dquot_file_open(struct inode *inode, struct file *file);
 extern void ext4_es_print_tree(struct inode *inode);
+// Add this so file.c can "see" the read hook
+extern ssize_t scorw_read_from_parent(struct scorw_inode *scorw_inode, struct kiocb *iocb, struct iov_iter *to, unsigned batch_start_blk, unsigned batch_end_blk);
 ssize_t scorw_generic_perform_write(struct file *file, struct iov_iter *i, loff_t pos, int write_to_par);
 ///////// scorw end //////////
 
@@ -137,45 +139,59 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	struct inode *inode = file_inode(iocb->ki_filp);
+    struct inode *inode = file_inode(iocb->ki_filp);
+    struct scorw_inode *s_inode;
+    int is_child_file;
 
-	if (unlikely(ext4_forced_shutdown(inode->i_sb)))
-		return -EIO;
+    if (unlikely(ext4_forced_shutdown(inode->i_sb)))
+        return -EIO;
 
-	if (!iov_iter_count(to))
-		return 0; /* skip atime */
-	
+    if (!iov_iter_count(to))
+        return 0;
 
-        /////////////follow on read///////////////
-        ///////////// scorw start /////////////
-	int is_child_file;
-	ssize_t ret;
-        is_child_file = scorw_is_child_file(inode, 0);
-        if(is_child_file && (!(iocb->ki_flags & IOCB_DIRECT)))
-        {
-                ret = scorw_follow_on_read_child_blocks(inode, iocb, to);
-                if(ret != SCORW_PERFORM_ORIG_READ)
-                {
-                        return ret;
+    ///////////// SCORW START /////////////
+    s_inode = scorw_find_inode(inode);
+    is_child_file = scorw_is_child_file(inode, 0);
+
+    if (s_inode) {
+        // Self-heal parent logs if needed
+         if (is_child_file && s_inode->i_par_vfs_inode) {
+            if (!s_inode->i_par_vfs_inode->i_scorw_inode) {
+                scorw_get_inode(s_inode->i_par_vfs_inode, 0, 0);
+            }
+        }
+
+        // Route versioned files
+        if (is_child_file || s_inode->i_log_vfs_inode != NULL) {
+            if (!(iocb->ki_flags & IOCB_DIRECT)) {
+                struct address_space *orig_mapping = iocb->ki_filp->f_mapping;
+                ssize_t ret;
+
+                // THE HIJACK: Point to Parent's RAM if it's a child
+                if (is_child_file && s_inode->i_par_vfs_inode) {
+                    iocb->ki_filp->f_mapping = s_inode->i_par_vfs_inode->i_mapping;
                 }
+
+                ret = scorw_read_from_parent(s_inode, iocb, to, 0, 0);
+
+                // RESTORE: Prevent kernel panics
+                iocb->ki_filp->f_mapping = orig_mapping;
+                return ret;
+            } else {
+                return 0; // Abort direct IO
+            }
         }
-        else if(is_child_file && ((iocb->ki_flags & IOCB_DIRECT)))
-        {
-                return 0;
-        }
-
-        ///////////// scorw end /////////////
-
-
+    }
+    ///////////// SCORW END /////////////
 
 #ifdef CONFIG_FS_DAX
-	if (IS_DAX(inode))
-		return ext4_dax_read_iter(iocb, to);
+    if (IS_DAX(inode))
+        return ext4_dax_read_iter(iocb, to);
 #endif
-	if (iocb->ki_flags & IOCB_DIRECT)
-		return ext4_dio_read_iter(iocb, to);
+    if (iocb->ki_flags & IOCB_DIRECT)
+        return ext4_dio_read_iter(iocb, to);
 
-	return generic_file_read_iter(iocb, to);
+    return generic_file_read_iter(iocb, to);
 }
 
 static ssize_t ext4_file_splice_read(struct file *in, loff_t *ppos,
@@ -904,7 +920,7 @@ out:
 }
 #endif
 
-static ssize_t
+ssize_t
 ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
@@ -1320,7 +1336,7 @@ again:
 		if (unlikely(status < 0))
 			break;
 
-		char* addr = (char*)kmap_atomic(page);
+		//char* addr = (char*)kmap_atomic(page);
 		//printk("After write begin: %c%c%c%c%c\n", addr[0], addr[1], addr[2], addr[3], addr[4]);
 		//kunmap_atomic((void *)addr);
 
@@ -1344,7 +1360,7 @@ again:
 		flush_dcache_page(page);
 
 		//printk("After write iter: %c%c%c%c%c\n", addr[0], addr[1], addr[2], addr[3], addr[4]);
-		kunmap_atomic((void *)addr);
+		//kunmap_atomic((void *)addr);
 		
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
 						folio, fsdata); //Rajan folio patch

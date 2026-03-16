@@ -15,6 +15,12 @@
 #define CHILD_NAME_LEN 16
 #define CHILD_RANGE_LEN 16
 
+//MAHA_AARSH_start
+
+#include <linux/xarray.h>
+
+//MAHA_AARSH_end
+
 #ifdef USE_OLD_RANGE
 struct child_range
 {
@@ -68,11 +74,25 @@ struct child_range_xattr
 //loff_t: long long 
 
 //MAHA_VERSION_AARSH_start
-struct scorw_version_start_end{
-	unsigned long start;
-	unsigned long end;
+// 1. DISK STRUCTURE: A single transaction record appended to your Log File.
+// Because it is a fixed 24 bytes, appending it is incredibly fast.
+struct scorw_log_record {
+        __u32 version_num;       // e.g., Version 2
+        __u32 logical_start_blk; // Where the user wrote it (e.g., Block 5)
+        __u64 physical_start_blk;// Where Ext4 actually put it on disk
+        __u32 len_blks;          // How many blocks were written contiguously
+        __u32 padding;           // Ensures 64-bit memory alignment
 };
-
+// 2. RAM STRUCTURE: The fast lookup tree for a single version.
+struct scorw_version {
+        int version_num;
+        
+        // Lockless Radix Tree: Maps Logical Block -> Physical Block
+        struct xarray delta_map; 
+        
+        // Fallback pointer to the previous version
+        struct scorw_version *parent; 
+};
 
 //MAHA_VERSION_AARSH_end
 
@@ -156,10 +176,13 @@ struct scorw_inode
 	int is_see_thru;
 	int is_see_thru_ro;
 	int version; //stores parent version for parent and child version for child
-	struct scorw_version_start_end versions[MAX_VERSIONS];
+	
+	struct scorw_version *version_states[MAX_VERSIONS]; //stores version states.
+
 	struct inode *i_log_vfs_inode;
 	unsigned long orig_size; //TODO : look at this
 	
+	bool is_log_initialized; //to check if log file and ram structures have been initialized for this inode. This is needed because we want to delay initialization of log file and ram structures until we are sure that they are needed. We don't want to initialize them for all inodes that can potentially become parent because it will lead to too much overhead.
 	///MAHA_VERSION_AARSH_end	
 };
 
@@ -338,6 +361,8 @@ void scorw_read_barrier_begin(struct scorw_inode *p_scorw_inode, unsigned block_
 void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode, unsigned block_num, struct uncopied_block **uncopied_block);
 
 //MAHA_VERSION_AARSH_start
+//extern int scorw_get_log_file_name_attr(struct inode *inode, char *name);
+extern ssize_t ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from);
 loff_t scorw_write_see_thru_ro(struct file *file,struct iov_iter *i, loff_t pos);
 void write_offset_log(struct inode* l_inode , loff_t offset , int len ,void* ptr);
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos, loff_t dest_pos, size_t len);
@@ -346,6 +371,12 @@ void scorw_set_curr_version_attr_val(struct inode *inode , unsigned long val /*V
 unsigned long scorw_get_original_parent_size(struct inode * p_inode);
 int update_version(struct inode* c_inode);
 unsigned long scorw_get_log_attr_val(struct inode *inode);
+void scorw_init_ram_and_log(struct inode *vfs_inode, struct scorw_inode *scorw_inode);
+struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num);
+void scorw_cleanup_versions(struct scorw_inode *s_inode);
+void scorw_replay_log(struct scorw_inode *s_inode) ;
+unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk);
+int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len);
 //MAHA_VERSION_AARSH_end
 #endif
 
