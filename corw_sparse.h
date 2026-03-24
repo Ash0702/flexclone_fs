@@ -89,9 +89,6 @@ struct scorw_version {
         
         // Lockless Radix Tree: Maps Logical Block -> Physical Block
         struct xarray delta_map; 
-        
-        // Fallback pointer to the previous version
-        struct scorw_version *parent; 
 };
 
 //MAHA_VERSION_AARSH_end
@@ -178,6 +175,10 @@ struct scorw_inode
 	int version; //stores parent version for parent and child version for child
 	
 	struct scorw_version *version_states[MAX_VERSIONS]; //stores version states.
+
+	int loaded_versions[4]; // FIFO queue of loaded version numbers
+	int loaded_version_count;
+	int fifo_head;
 
 	struct inode *i_log_vfs_inode;
 	unsigned long orig_size; //TODO : look at this
@@ -374,7 +375,7 @@ unsigned long scorw_get_log_attr_val(struct inode *inode);
 void scorw_init_ram_and_log(struct inode *vfs_inode, struct scorw_inode *scorw_inode);
 struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num);
 void scorw_cleanup_versions(struct scorw_inode *s_inode);
-void scorw_replay_log(struct scorw_inode *s_inode) ;
+void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk);
 int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len);
 //MAHA_VERSION_AARSH_end

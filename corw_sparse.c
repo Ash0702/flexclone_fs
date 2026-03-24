@@ -1310,6 +1310,7 @@ void scorw_free_inode(struct scorw_inode *scorw_inode)
 {
         //printk("Inside scorw_free_inode\n");
         //return vfree(scorw_inode);/// Patching to kfree
+        scorw_cleanup_versions(scorw_inode);
 		return kfree(scorw_inode);
 }
 
@@ -1362,14 +1363,13 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 		if (!IS_ERR(scorw_inode->i_log_vfs_inode)) {
 			if(scorw_inode->is_log_initialized == false)
 			{
-				scorw_replay_log(scorw_inode);
 				scorw_inode->is_log_initialized = true;
 			}
 		}
 
 }
 
-//return 1 if child inode
+//return 1 if child inodecd ./maha-flex-clone-cs-614-2026-Maha_port_clone/test_rajan/
 int scorw_is_child_file(struct inode* inode, int consult_extended_attributes)
 {
         unsigned long p_ino_num;
@@ -4299,6 +4299,9 @@ void scorw_cleanup_versions(struct scorw_inode *s_inode)
                 }
         }
         
+        s_inode->loaded_version_count = 0;
+        s_inode->fifo_head = 0;
+
         // Release the Log File inode so Ext4 can clean it up
         if (s_inode->i_log_vfs_inode != NULL) {
                 iput(s_inode->i_log_vfs_inode);
@@ -4306,13 +4309,35 @@ void scorw_cleanup_versions(struct scorw_inode *s_inode)
         }
 }
 
+void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
+
 struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num) 
 {
         int idx = v_num - 1;
         struct scorw_version *new_v;
+        int evict_idx, evict_v_num;
+        struct scorw_version *evict_v;
         
         if (idx < 0 || idx >= MAX_VERSIONS) return NULL;
         if (s_inode->version_states[idx] != NULL) return s_inode->version_states[idx]; // Already exists
+
+        // Run FIFO eviction if we have 4 loaded versions
+        if (s_inode->loaded_version_count == 4) {
+                evict_idx = s_inode->fifo_head;
+                evict_v_num = s_inode->loaded_versions[evict_idx];
+                evict_v = s_inode->version_states[evict_v_num - 1];
+                
+                if (evict_v) {
+                        xa_destroy(&evict_v->delta_map);
+                        kfree(evict_v);
+                        s_inode->version_states[evict_v_num - 1] = NULL;
+                }
+                
+                s_inode->loaded_versions[evict_idx] = v_num;
+                s_inode->fifo_head = (s_inode->fifo_head + 1) % 4;
+        } else {
+                s_inode->loaded_versions[s_inode->loaded_version_count++] = v_num;
+        }
 
         new_v = kzalloc(sizeof(struct scorw_version), GFP_KERNEL);
         if (!new_v) return NULL;
@@ -4322,18 +4347,15 @@ struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, i
         // Initialize the lockless Radix Tree for this specific version!
         xa_init(&new_v->delta_map);
 
-        // Link it backwards in time to build the "Time Machine"
-        if (idx > 0) {
-                new_v->parent = scorw_get_or_create_version(s_inode, v_num - 1);
-        } else {
-                new_v->parent = NULL;
-        }
-
         s_inode->version_states[idx] = new_v;
+
+        // Load exactly this version's blocks from the log on demand
+        scorw_replay_log_version(s_inode, v_num);
+
         return new_v;
 }
 
-void scorw_replay_log(struct scorw_inode *s_inode) 
+void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version) 
 {
         struct inode *log_inode = s_inode->i_log_vfs_inode;
         loff_t log_size, offset = 0;
@@ -4346,7 +4368,7 @@ void scorw_replay_log(struct scorw_inode *s_inode)
         if (!log_inode) return; // No log file exists yet!
 
         log_size = i_size_read(log_inode);
-		printk("Replaying log file\n");
+        printk("Replaying log file for version %d\n", target_version);
         // Read the log file page by page
         while (offset < log_size) {
                 pgoff_t index = offset >> PAGE_SHIFT;
@@ -4371,14 +4393,14 @@ void scorw_replay_log(struct scorw_inode *s_inode)
                 while (bytes_to_read >= sizeof(struct scorw_log_record)) {
                         
                         // Safety check to avoid garbage data
-                        if (record->version_num > 0) { 
-                                v = scorw_get_or_create_version(s_inode, record->version_num);
+                        if (record->version_num == target_version) { 
+                                v = s_inode->version_states[target_version - 1];
                                 if (v) {
                                         // Store every block of this extent into the XArray!
                                         for (i = 0; i < record->len_blks; i++) {
                                                 xa_store(&v->delta_map, 
                                                          record->logical_start_blk + i,
-							xa_mk_value(record->physical_start_blk + i), 
+                                                         xa_mk_value(record->physical_start_blk + i), 
                                                          GFP_KERNEL);
                                         }
                                 }
@@ -4435,8 +4457,8 @@ void scorw_init_ram_and_log(struct inode *inode, struct scorw_inode *s_inode) {
     s_inode->i_log_vfs_inode = file_inode(log_file);
     printk("SCORW_DEBUG: HEAL SUCCESS - Log Inode is %lu\n", s_inode->i_log_vfs_inode->i_ino);
     
-    // 4. Fill the XArray
-    scorw_replay_log(s_inode);
+    // We don't pre-fill the XArray unconditionally anymore
+    // scorw_replay_log_version will be called per-version on demand
 }
 	*/
 // Returns the Physical Block Number if modified, or '0' if it was never touched.
@@ -4453,12 +4475,12 @@ unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned 
     }
 
     for (v = s_inode->version; v >= 1; v--) {
-        struct scorw_version *sv = source->version_states[v - 1];
+        struct scorw_version *sv = scorw_get_or_create_version(source, v);
         
         if (sv) {
             void *found_blk = xa_load(&sv->delta_map, target_logical_blk);
 
-            if (found_blk) /*return (unsigned long)found_blk*/ return xa_to_value(found_blk);
+            if (found_blk) return xa_to_value(found_blk);
         }
     }
 
