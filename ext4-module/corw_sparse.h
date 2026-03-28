@@ -91,6 +91,17 @@ struct scorw_version {
         struct xarray delta_map; 
 };
 
+struct scorw_io_vec {
+    __u64 logical_offset;
+    __u32 len;
+    void __user *buf;
+};
+
+struct scorw_writev_args {
+    __u32 count;
+    struct scorw_io_vec __user *vecs;
+};
+
 //MAHA_VERSION_AARSH_end
 
 
@@ -378,6 +389,7 @@ void scorw_cleanup_versions(struct scorw_inode *s_inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk);
 int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len);
+long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg);
 //MAHA_VERSION_AARSH_end
 #endif
 

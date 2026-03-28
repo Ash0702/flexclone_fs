@@ -143,6 +143,7 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
     struct scorw_inode *s_inode;
     int is_child_file;
 
+    printk("Helllllllllooooooooooooooooooooooo\n");
     if (unlikely(ext4_forced_shutdown(inode->i_sb)))
         return -EIO;
 
@@ -156,8 +157,9 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
     if (s_inode) {
         // Self-heal parent logs if needed
          if (is_child_file && s_inode->i_par_vfs_inode) {
-            if (!s_inode->i_par_vfs_inode->i_scorw_inode) {
-                scorw_get_inode(s_inode->i_par_vfs_inode, 0, 0);
+            if (! (s_inode->i_par_vfs_inode->i_scorw_inode) ) {
+		printk("Called at MARK1\n");
+                scorw_get_inode(s_inode->i_par_vfs_inode, 0, 0); // TODO : FIXbug REMOVE THIS XXX
             }
         }
 
@@ -216,7 +218,8 @@ static int ext4_release_file(struct inode *inode, struct file *filp)
         ////////// scorw start //////////
         //print info about inodes in scorw inodes list
         //scorw_print_inode_list();
-
+	
+	printk("[DEBUG] :: %s called with inode_number = %ld" , __func__ , inode->i_ino);
 
         //printk("ext4_release_file: Checking whether file is a sparse file\n");
         if(scorw_is_child_file(inode, 0))
@@ -226,13 +229,14 @@ static int ext4_release_file(struct inode *inode, struct file *filp)
                 mutex_lock(&(inode->i_vfs_inode_open_close_lock));
                 atomic_sub(1, &(inode->i_vfs_inode_open_count));
 
-                scorw_put_inode(inode, 1, 0, 0);
+                scorw_put_inode(inode->i_scorw_inode->i_par_vfs_inode, 0, 0, 0); // XXX
 
                 mutex_unlock(&(inode->i_vfs_inode_open_close_lock));
         }
         else if(scorw_is_par_file(inode, 0))
         {
-                //This lock makes sure that open(par),close(par) and creation of par scorw inodes inside special_open() happens atomically
+        	printk("%s : Entered scorw_is_par_file\n" , __func__);	
+	        //This lock makes sure that open(par),close(par) and creation of par scorw inodes inside special_open() happens atomically
                 mutex_lock(&(inode->i_vfs_inode_open_close_lock));
                 atomic_sub(1, &(inode->i_vfs_inode_open_count));
 
@@ -1114,7 +1118,8 @@ static int ext4_file_open(struct inode *inode, struct file *filp)
 
         struct scorw_inode *p_scorw_inode = NULL;
         struct scorw_inode *c_scorw_inode = NULL;
-
+	int p_ino_num = -1;
+	struct inode *p_inode = NULL;
 	//scorw end//
 	
 	int ret;
@@ -1160,8 +1165,20 @@ static int ext4_file_open(struct inode *inode, struct file *filp)
                 atomic_add(1, &(inode->i_vfs_inode_open_count));
 
                 //printk("ext4_file_open: Yes! opened file is a child file\n");
-                c_scorw_inode = scorw_get_inode(inode, 1, 0);
 
+		///MAHA_AARSH_(testv_)
+		p_ino_num = scorw_get_parent_attr_val(inode);
+		p_inode = ext4_iget(inode->i_sb , p_ino_num , EXT4_IGET_NORMAL);
+		if(IS_ERR_VALUE(p_inode)) {
+			printk("[WIERD] :: stored parent_attr_val for c_ino_num=%d is invalid\n" , inode->i_ino);
+		}
+		p_scorw_inode = scorw_get_inode(p_inode , 0 , 0);
+		iput(p_inode);
+		///(testv__)
+
+                //c_scorw_inode = scorw_get_inode(inode, 1, 0); // XXX
+		printk("Returned to file.c for i_ino=%d\n" , inode->i_ino);
+	
                 mutex_unlock(&(inode->i_vfs_inode_open_close_lock));
         }
         else if(scorw_is_par_file(inode, 1))
@@ -1181,7 +1198,9 @@ static int ext4_file_open(struct inode *inode, struct file *filp)
 
 	filp->f_mode |= FMODE_NOWAIT;// | FMODE_CAN_ODIRECT; edit made
 	//return dquot_file_open(inode, filp);
-	return scorw_dquot_file_open(inode, filp);
+	ret = scorw_dquot_file_open(inode, filp);
+	printk("[DEBUG] :: returning from %s\n" , __func__);
+	return ret;
 }
 
 /*

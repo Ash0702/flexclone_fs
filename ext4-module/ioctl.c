@@ -29,8 +29,13 @@
 
 //MAHA_AARSH
 // TODO Move this into linux/fsmap
+#include "corw_sparse.h"
+
 #define EXT4_UPDATE_VERSION _IO('S' , 1) 
 extern int update_version(struct inode* c_inode);
+
+#define SCORW_IOC_WRITEV _IOW('S', 2, struct scorw_writev_args)
+extern long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg); 
 //MAHA_AARSH
 
 
@@ -1631,6 +1636,10 @@ resizefs_out:
 		// return 0	for success
 		printk("Calling update for child\n"); 
 		return update_version(file_inode(filp));
+	
+	case SCORW_IOC_WRITEV:
+		return scorw_ioctl_see_thru_writev(filp, arg);  
+
 	//MAHA_AARSH_end
 		
 
@@ -1714,6 +1723,7 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case FS_IOC_SETFSLABEL:
 	case EXT4_IOC_GETFSUUID:
 	case EXT4_IOC_SETFSUUID:
+	case SCORW_IOC_WRITEV:
 		break;
 	default:
 		return -ENOIOCTLCMD;
