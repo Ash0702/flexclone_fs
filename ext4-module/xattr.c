@@ -2574,7 +2574,7 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 	extern char *scorw_child;
 	extern char *scorw_child_frnd;
 	extern char *scorw_range_start;
-	extern char *scorw_range_end;
+	//extern char *scorw_range_end;
 	extern char *num_ranges;
 	extern char *version;
 	//MAHA_AARSH_VERSION_start
@@ -2582,7 +2582,7 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 	extern char *curr_version;
 	extern char *see_thru_ro;
 	int is_see_thru = 0; 
-	unsigned long variable_with_val_0 = 0; // just some local variable to init the version by 1
+	//unsigned long variable_with_val_0 = 0; // just some local variable to init the version by 1
 	unsigned long variable_with_val_1 = 1; // just some local variable to init the version by 1
 	unsigned long parent_original_size; // TODO : remove this ( works only for our HACKY soln)
 	extern char* par_org; // Same TODO as above
@@ -2748,7 +2748,7 @@ ext4_xattr_set(struct inode *inode, int name_index, const char *name,
 			ext4_xattr_set(c_inode , 1 , curr_version , &(variable_with_val_1) , sizeof(unsigned long), 0); 
 			ext4_xattr_set(p_inode , 1 , curr_version , &(variable_with_val_1) , sizeof(unsigned long), 0); 
 			ext4_xattr_set(p_inode , 1 , par_org , &(parent_original_size) , sizeof(unsigned long) , 0);
-			printk("Setting parent original size %lld , l_inode_num = %lld\n" ,parent_original_size , h_inodes->l_inode_num );
+			printk("Setting parent original size %lu , l_inode_num = %lu\n" ,parent_original_size , h_inodes->l_inode_num );
 			//MAHA_AARSH_VERSION_end
 			////////////////////////////////////////////////////////////////////////////////////////////////////////
 			//Saving info about range of blocks corresponding which 
