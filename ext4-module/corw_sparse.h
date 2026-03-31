@@ -89,13 +89,26 @@ struct scorw_version {
         
         // Lockless Radix Tree: Maps Logical Block -> Physical Block
         struct xarray delta_map; 
-        
-        // Fallback pointer to the previous version
-        struct scorw_version *parent; 
+};
+
+struct scorw_io_vec {
+    __u64 logical_offset;
+    __u32 len;
+    void __user *buf;
+};
+
+struct scorw_writev_args {
+    __u32 count;
+    struct scorw_io_vec __user *vecs;
 };
 
 //MAHA_VERSION_AARSH_end
 
+struct Transaction_locks {
+	struct mutex transaction_lock;
+	struct task_struct *owner;
+	int transaction;
+};
 
 struct scorw_inode
 {
@@ -179,8 +192,17 @@ struct scorw_inode
 	
 	struct scorw_version *version_states[MAX_VERSIONS]; //stores version states.
 
+	int loaded_versions[4]; // FIFO queue of loaded version numbers
+	int loaded_version_count;
+	int fifo_head;
+
 	struct inode *i_log_vfs_inode;
 	unsigned long orig_size; //TODO : look at this
+
+	struct Transaction_locks t_locks; /* Imagine this case , 2 process open the same file.
+					     one of them calls BeginTransaction and the other EndTransaction. Ideally
+					     it should error , but it won't without a lock. We can put some unique file_pointer type shit
+			     		  */ 
 	
 	bool is_log_initialized; //to check if log file and ram structures have been initialized for this inode. This is needed because we want to delay initialization of log file and ram structures until we are sure that they are needed. We don't want to initialize them for all inodes that can potentially become parent because it will lead to too much overhead.
 	///MAHA_VERSION_AARSH_end	
@@ -284,6 +306,11 @@ struct scorw_extent
 #define SCORW_PARENT_NOT_FOUND 		-8003
 #define SCORW_PARENT_ERROR 		-8004
 
+/*MAHA_AARSH_START*/
+#define SET_NORMAL_WRITE                    2
+#define SET_TRANSACTION		            1
+#define UNSET_TRANSACTION 		    0
+/*MAHA_AARSH_END*/
 ///////////////////////
 //Information messages (Return values that try to convey something to caller other than error)
 //////////////////////
@@ -374,9 +401,13 @@ unsigned long scorw_get_log_attr_val(struct inode *inode);
 void scorw_init_ram_and_log(struct inode *vfs_inode, struct scorw_inode *scorw_inode);
 struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num);
 void scorw_cleanup_versions(struct scorw_inode *s_inode);
-void scorw_replay_log(struct scorw_inode *s_inode) ;
+void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk);
 int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len);
+long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg);
+long scorw_set_transaction(struct inode * inode , int val);
+int scorw_get_transaction_status(struct inode * inode);
+void init_Transaction_locks(struct scorw_inode * scorw_inode);
 //MAHA_VERSION_AARSH_end
 #endif
 
