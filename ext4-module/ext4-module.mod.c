@@ -389,6 +389,7 @@ __used __section("__versions") = {
 	{ 0x28fcf6a7, "iomap_swapfile_activate" },
 	{ 0xd5263820, "mb_cache_destroy" },
 	{ 0x7b06b325, "trace_event_reg" },
+	{ 0x364c23ad, "mutex_is_locked" },
 	{ 0x8bdfc47c, "__mb_cache_entry_free" },
 	{ 0xa15738b8, "fscrypt_ioctl_remove_key" },
 	{ 0x49e8f8b, "folio_mkclean" },
@@ -427,6 +428,7 @@ __used __section("__versions") = {
 	{ 0xbcab6ee6, "sscanf" },
 	{ 0xcefb0c9f, "__mutex_init" },
 	{ 0xc2bcc1bb, "__bread_gfp" },
+	{ 0x89940875, "mutex_lock_interruptible" },
 	{ 0x40e91c6d, "from_kprojid" },
 	{ 0xc3c51965, "bdev_file_open_by_dev" },
 	{ 0x75ca79b5, "__fortify_panic" },
@@ -693,4 +695,4 @@ __used __section("__versions") = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "13F7F0B142433F2A37B6411");
+MODULE_INFO(srcversion, "64AC793E41C496CBCACE03C");
