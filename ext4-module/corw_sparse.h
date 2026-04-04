@@ -411,6 +411,9 @@ int scorw_self_transaction_status(struct inode * inode , struct file* file);
 void init_Transaction_locks(struct scorw_inode * scorw_inode);
 int scorw_get_see_thru_attr_val(struct inode *inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
+u32 scorw_get_last_open_time(struct inode* inode);
+u32 scorw_set_last_open_time(struct inode* inode);
+int is_corrupt(struct inode * inode);
 //MAHA_VERSION_AARSH_end
 #endif
 

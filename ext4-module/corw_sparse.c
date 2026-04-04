@@ -29,7 +29,7 @@
 #include <linux/hashtable.h>
 
 #include <linux/iomap.h>
-
+#include <linux/timekeeping.h>
 
 enum batching_type
 {
@@ -63,6 +63,7 @@ char *version = "v";
 char *curr_version = "curr_version";
 char *par_org = "PAR_ORGY";
 char *see_thru_ro = "SEE_THRU_RO";
+char *last_open_time = "LAST_OPEN_TIME";
 char *scorw_log = "SCORW_LOG";
 //MAHA_AARSH_VERSION_end
 unsigned long scorw_get_process_usage_count(struct scorw_inode *scorw_inode);
@@ -413,6 +414,32 @@ unsigned long scorw_get_friend_attr_val(struct inode *inode)
 }
 
 //MAHA_AARSH_Start
+u32 scorw_get_last_open_time(struct inode* inode){
+	u32 lopen_time; /*Short for last_open_time*/
+	int buf_size;
+
+	buf_size = ext4_xattr_get(inode, 1, last_open_time , &lopen_time, sizeof(u32));
+	if(buf_size > 0){
+		return lopen_time;
+	} 
+	return 0;	
+}
+
+
+
+
+
+u32 scorw_set_last_open_time(struct inode* inode){
+	int buf_size;
+	u32 curr_time = (u32) ktime_get_real_seconds();
+	buf_size = ext4_xattr_set(inode, 1, last_open_time , &curr_time, sizeof(u32) , 0);
+	if(buf_size > 0){
+		return 1;
+	} 
+	return 0;	
+}
+
+
 
 int scorw_get_see_thru_attr_val(struct inode *inode)
 {
@@ -1317,6 +1344,34 @@ void scorw_free_inode(struct scorw_inode *scorw_inode)
 }
 
 // MAHA_AARSH_Start
+
+
+
+int is_corrupt(struct inode * inode){
+	struct ext4_sb_info * sbi;
+	struct ext4_super_block * es;
+	struct super_block *sb;
+	u32 lopen , mtime;		
+	lopen = scorw_get_last_open_time(inode);
+	
+	if(lopen == 0){ /*We are opening for the very first time*/
+		scorw_set_last_open_time(inode);
+		return 0;
+	}	
+	
+	if(!inode){
+		return 0;
+	}
+
+	sb  = inode->i_sb;
+	sbi = EXT4_SB(sb);
+	es  = sbi->s_es;
+	mtime = le32_to_cpu(es->s_mtime);
+		
+	return (mtime > lopen);
+}
+
+
 void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_inode)
 {
 	int i = 0;
@@ -1326,7 +1381,12 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 	int curr_version = 1;	
 	unsigned long orig_size = 0;
 	int is_see_thru_ro = 0;
+	int to_be_checked;
+	
+	to_be_checked = is_corrupt(vfs_inode);
+	scorw_set_last_open_time(vfs_inode);
 
+	printk("[DEBUG] :: {%s} :: i_ino=%lu is_corrupt=%d\n" , __func__ , vfs_inode->i_ino , to_be_checked);
 	is_see_thru_ro = scorw_get_see_thru_attr_val(vfs_inode);
 	BUG_ON(is_see_thru_ro == -1);
 
@@ -1511,7 +1571,11 @@ int scorw_put_inode(struct inode *inode, int is_child_inode, int is_thread_putti
 	struct list_head *curr;
 	struct page_copy *curr_page_copy;
 
+	
+//	dump_stack();
 	printk("[DEBUG] :: %s called for inode %ld\n" , __func__ , inode->i_ino);
+
+		
 
 	//printk("1.scorw_put_inode called for inode: %lu\n", inode->i_ino);
 	//If this is the last reference to child scorw inode, we will be inserting
@@ -3556,6 +3620,7 @@ void scorw_unprepare_page_copy(struct page_copy *page_copy)
 	//
 	//scorw_dec_process_usage_count(page_copy->par);
 	scorw_put_inode(page_copy->par->i_vfs_inode, 0, 1, 0);
+	printk("[DEBUG_SYNC] :: Back from scorw_put_inode ma'am\n");
 }
 
 void scorw_remove_page_copy_hlist(struct page_copy *page_copy)
@@ -3873,9 +3938,13 @@ int scorw_page_copy_thread_fn(void *arg)
 					scorw_dec_yet_to_copy_blocks_count(c_scorw_inode, 1);
 					//signal to sync path regarding completion of this copy
 					//so that child blk can be flushed to disk
+					printk("waking up buddy\n");
 					wake_up(&sync_child_wait_queue);
 				}
 
+			} else {
+				printk("waking up buddy\n");
+				wake_up(&sync_child_wait_queue);
 			}
 			scorw_put_uncopied_block(c_scorw_inode, block_num, COPYING_EXCL, uncopied_block);
 			scorw_remove_uncopied_block(c_scorw_inode, block_num, uncopied_block);
@@ -4253,7 +4322,7 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	append_pos = (i_size_read(inode) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 	appended_ext4_blk = append_pos / PAGE_SIZE;
 
-	if (scorw_internal_copy_blocks(file, target_logical_blk * PAGE_SIZE, append_pos, append_count) < 0) { /*TODO : handle multi-block writes*/
+	if (scorw_internal_copy_blocks(file, target_logical_blk * PAGE_SIZE, append_pos, append_count) < 0) { 
 		return pos;
 	}
 
@@ -4543,7 +4612,9 @@ int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, u
 
 	if (!s_inode) return -EINVAL;
 	curr_version = s_inode -> version;
-	if(status == SET_TRANSACTION) curr_version ++;
+	if(status == SET_TRANSACTION){ 
+		curr_version ++; /*We increase the version while END_TXN*/
+	}
 	// DEBUG: Let's see if we even enter the logger
 	printk("SCORW_DEBUG: Attempting to log write for Inode %lu. Target Version: %d\n", 
 			s_inode->i_vfs_inode->i_ino, curr_version);
@@ -4783,31 +4854,54 @@ out_free_vecs:
 }
 
 
-
+/*
 static int writeback_inode(struct inode * inode){
 	int ret;
-
+	struct address_space *mapping = inode->i_mapping;
 	printk("[SCORW_DEBUG] :: {%s} i_ino = %lu\n" , __func__ , inode->i_ino);
-	ret = filemap_write_and_wait(inode->i_mapping);	
-	if(ret){
-		printk("[SCORW_ERROR] :: Writeback failed , delete %lu\n" , inode->i_ino);
-		return -25;
+	ret = __filemap_fdatawrite_range(mapping , 0 , LLONG_MAX , WB_SYNC_ALL);	
+	if(ret != -EIO){
+		__filemap_fdatawait_range(mapping , 0 , LLONG_MAX);
 	}
-	sync_inode_metadata(inode, 1);
-	return 0;
+	printk("[SCORW_DEBUG] :: Returning from %s" , __func__);
+	return ret;
 }
+*/
 
-
+static void scorw_help_write_and_wait(struct inode* inode , struct file * file){
+	char * err_msg = "WEIRD_ERROR";
+	int ret;
+	printk("[%s] :: inside %s\n" , err_msg , __func__);
+/*
+	ret = filemap_fdatawrite(inode->i_mapping);
+	if(ret){
+		printk("filemap_fdatawrite failed\n");
+	}
+	printk("Congrats Part1 passed\n");
+	
+	ret = filemap_fdatawait_range(inode->i_mapping , 0 , LLONG_MAX);
+	printk("Congrats Part2 passed\n");
+*/
+	printk("Calling ext4_sync_file\n");
+	ret = ext4_sync_file(file , 0 , LLONG_MAX , 0);
+	if(ret){
+		printk("Ooopsss..... some error\n");
+		return;
+	} 
+	printk("Yayyyyyyyyyyyyyyyy , file synced\n");
+	return;
+}
 
 /*calling with val=SET_TRANSACTION increases scorw_inode->version by 1*/
 long scorw_set_transaction(struct inode* inode , struct file * file , int val){
 	int ret;
 	struct scorw_inode * scorw_inode;
 	struct Transaction_locks * t_locks;
+	struct inode* log_inode;
 
 	printk("[DEBUG] :: Entered %s with val=%d" , __func__ , val);
 	scorw_inode = inode->i_scorw_inode;
-
+	log_inode = scorw_inode -> i_log_vfs_inode;
 	if(!scorw_inode){
 		return -1;
 	}
@@ -4824,23 +4918,26 @@ long scorw_set_transaction(struct inode* inode , struct file * file , int val){
 		}
 		t_locks->owner = file;
 		t_locks->transaction = val;
-		if(val == SET_TRANSACTION){
-			__sync_fetch_and_add(&(scorw_inode->version), 1);
-			scorw_set_curr_version_attr_val(inode, scorw_inode->version); // UPDATE DISK XATTR
-		}
 	}
  
 	else if(val == UNSET_TRANSACTION){
 		if(!mutex_is_locked(&(t_locks->transaction_lock)) || (t_locks->owner != file  )){
 			return -25;
 		}
-/*		writeback_inode(inode);
-		writeback_inode(scorw_inode->i_log_vfs_inode);
-*/
+		
+		if(t_locks->transaction == SET_TRANSACTION){
+			scorw_help_write_and_wait(inode , file); /*Try to sync*/
+			//scorw_help_write_and_wait();
+			printk("[DEBUG] :: file sync done , now syncing log file\n");
+			filemap_write_and_wait(log_inode->i_mapping);
+           		sync_inode_metadata(log_inode, 1); 
+			printk("[DEBUG] :: log file synced\n");
+
+			__sync_fetch_and_add(&(scorw_inode -> version) , 1);
+			scorw_set_curr_version_attr_val(inode, scorw_inode->version);
+		}
 		t_locks->owner = NULL;
 		t_locks->transaction = val;
-		__sync_fetch_and_add(&(scorw_inode -> version) , 1);
-		scorw_set_curr_version_attr_val(inode, scorw_inode->version);
 		mutex_unlock( &(t_locks->transaction_lock ));	
 	}
 
