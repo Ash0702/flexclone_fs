@@ -1420,6 +1420,14 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 		scorw_inode->i_range[i].start = -1;
 		scorw_inode->i_range[i].end = -1;
 	}
+	// Initialize version cache slots as empty
+	for(i=0; i<MAX_RAM_VERSIONS; i++)
+	{
+		scorw_inode->version_cache[i] = NULL;
+		scorw_inode->cache_v_nums[i] = -1;
+	}
+	scorw_inode->loaded_version_count = 0;
+	scorw_inode->fifo_head = 0;
 	printk("SCORW_DEBUG: Inode %lu (Address: %p) - Init Flag is: %d\n",
 			vfs_inode->i_ino, scorw_inode, scorw_inode->is_log_initialized);
 	if (!IS_ERR(scorw_inode->i_log_vfs_inode)) {
@@ -4408,12 +4416,13 @@ void write_offset_log(struct inode *l_inode, loff_t offset, int len, void* ptr)
 void scorw_cleanup_versions(struct scorw_inode *s_inode)
 {
 	int i;
-	// Destroy all XArrays and free the structs
-	for (i = 0; i < MAX_VERSIONS; i++) {
-		if (s_inode->version_states[i] != NULL) {
-			xa_destroy(&s_inode->version_states[i]->delta_map);
-			kfree(s_inode->version_states[i]);
-			s_inode->version_states[i] = NULL;
+	// Destroy all cached XArrays and free the structs
+	for (i = 0; i < MAX_RAM_VERSIONS; i++) {
+		if (s_inode->version_cache[i] != NULL) {
+			xa_destroy(&s_inode->version_cache[i]->delta_map);
+			kfree(s_inode->version_cache[i]);
+			s_inode->version_cache[i] = NULL;
+			s_inode->cache_v_nums[i] = -1;
 		}
 	}
 
@@ -4430,41 +4439,46 @@ void scorw_cleanup_versions(struct scorw_inode *s_inode)
 
 struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, int v_num) 
 {
-	int idx = v_num - 1;
 	struct scorw_version *new_v;
-	int evict_idx, evict_v_num;
+	int evict_idx;
 	struct scorw_version *evict_v;
+	int i;
 
-	if (idx < 0 || idx >= MAX_VERSIONS) return NULL;
-	if (s_inode->version_states[idx] != NULL) return s_inode->version_states[idx]; // Already exists
+	if (v_num < 1) return NULL;
 
-	// Run FIFO eviction if we have 4 loaded versions
-	if (s_inode->loaded_version_count == MAX_RAM_VERSIONS) {
-		evict_idx = s_inode->fifo_head;
-		evict_v_num = s_inode->loaded_versions[evict_idx];
-		evict_v = s_inode->version_states[evict_v_num - 1];
-
-		if (evict_v) {
-			xa_destroy(&evict_v->delta_map);
-			kfree(evict_v);
-			s_inode->version_states[evict_v_num - 1] = NULL;
-		}
-
-		s_inode->loaded_versions[evict_idx] = v_num;
-		s_inode->fifo_head = (s_inode->fifo_head + 1) % MAX_RAM_VERSIONS;
-	} else {
-		s_inode->loaded_versions[s_inode->loaded_version_count++] = v_num;
+	// Check if this version is already cached
+	for (i = 0; i < MAX_RAM_VERSIONS; i++) {
+		if (s_inode->cache_v_nums[i] == v_num && s_inode->version_cache[i] != NULL)
+			return s_inode->version_cache[i];
 	}
 
+	// Not cached - need to allocate and load from log
 	new_v = kzalloc(sizeof(struct scorw_version), GFP_KERNEL);
 	if (!new_v) return NULL;
 
 	new_v->version_num = v_num;
-
-	// Initialize the lockless Radix Tree for this specific version!
 	xa_init(&new_v->delta_map);
 
-	s_inode->version_states[idx] = new_v;
+	// Run FIFO eviction if cache is full
+	if (s_inode->loaded_version_count == MAX_RAM_VERSIONS) {
+		evict_idx = s_inode->fifo_head;
+		evict_v = s_inode->version_cache[evict_idx];
+
+		if (evict_v) {
+			xa_destroy(&evict_v->delta_map);
+			kfree(evict_v);
+		}
+
+		// Place new version in the evicted slot
+		s_inode->version_cache[evict_idx] = new_v;
+		s_inode->cache_v_nums[evict_idx] = v_num;
+		s_inode->fifo_head = (s_inode->fifo_head + 1) % MAX_RAM_VERSIONS;
+	} else {
+		// Place in the next available slot
+		s_inode->version_cache[s_inode->loaded_version_count] = new_v;
+		s_inode->cache_v_nums[s_inode->loaded_version_count] = v_num;
+		s_inode->loaded_version_count++;
+	}
 
 	// Load exactly this version's blocks from the log on demand
 	scorw_replay_log_version(s_inode, v_num);
@@ -4472,21 +4486,87 @@ struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, i
 	return new_v;
 }
 
+/*
+ * Helper: read a single scorw_log_record at a given byte offset in the log file.
+ * Returns 0 on success, -1 on failure.
+ */
+static int scorw_read_log_record_at(struct inode *log_inode, loff_t byte_offset,
+				    struct scorw_log_record *out_record)
+{
+	pgoff_t index = byte_offset >> PAGE_SHIFT;
+	unsigned int page_offset = byte_offset & (PAGE_SIZE - 1);
+	struct page *page;
+	char *kaddr;
+
+	page = read_mapping_page(log_inode->i_mapping, index, NULL);
+	if (IS_ERR(page))
+		return -1;
+
+	kaddr = (char *)kmap_atomic(page);
+	memcpy(out_record, kaddr + page_offset, sizeof(struct scorw_log_record));
+	kunmap_atomic(kaddr);
+	put_page(page);
+	return 0;
+}
+
+/*
+ * Binary search the log file to find the byte offset of the FIRST record
+ * whose version_num == target_version.
+ * Returns the byte offset, or log_size if target_version is not present.
+ */
+static loff_t scorw_bsearch_log_version_start(struct inode *log_inode,
+					      loff_t log_size, int target_version)
+{
+	loff_t rec_size = sizeof(struct scorw_log_record);
+	loff_t total_records = log_size / rec_size;
+	loff_t low = 0, high = total_records, mid;
+	struct scorw_log_record probe;
+
+	/* Standard lower_bound binary search */
+	while (low < high) {
+		mid = low + (high - low) / 2;
+		printk("mid = %lld\n", mid);
+		if (scorw_read_log_record_at(log_inode, mid * rec_size, &probe) < 0)
+			return log_size; /* read error, fall back to not found */
+
+		if (probe.version_num < (__u32)target_version)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+
+	return low * rec_size;
+}
+
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version) 
 {
 	struct inode *log_inode = s_inode->i_log_vfs_inode;
-	loff_t log_size, offset = 0;
+	loff_t log_size, offset;
 	struct page *page;
 	char *kaddr;
 	struct scorw_log_record *record;
 	struct scorw_version *v;
-	int i;
+	int i, cache_slot;
 
 	if (!log_inode) return; // No log file exists yet!
 
 	log_size = i_size_read(log_inode);
 	printk("Replaying log file for version %d\n", target_version);
-	// Read the log file page by page
+
+	// Find the target version's scorw_version in our cache
+	v = NULL;
+	for (cache_slot = 0; cache_slot < MAX_RAM_VERSIONS; cache_slot++) {
+		if (s_inode->cache_v_nums[cache_slot] == target_version) {
+			v = s_inode->version_cache[cache_slot];
+			break;
+		}
+	}
+	if (!v) return; // Version struct not in cache (shouldn't happen)
+
+	// Binary search for the first record of target_version
+	offset = scorw_bsearch_log_version_start(log_inode, log_size, target_version);
+
+	// Read forward from the found offset
 	while (offset < log_size) {
 		pgoff_t index = offset >> PAGE_SHIFT;
 		unsigned int page_offset = offset & (PAGE_SIZE - 1);
@@ -4495,40 +4575,37 @@ void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version)
 		if (offset + bytes_to_read > log_size)
 			bytes_to_read = log_size - offset;
 
-		// Grab the raw physical page from Ext4's mapping cache
 		page = read_mapping_page(log_inode->i_mapping, index, NULL);
 		if (IS_ERR(page)) {
 			printk(KERN_ERR "SCORW: Failed to read log page!\n");
 			break;
 		}
 
-		// Map the page into kernel RAM (just like your copy loop!)
 		kaddr = (char *)kmap_atomic(page);
 		record = (struct scorw_log_record *)(kaddr + page_offset);
 
-		// Loop through every 24-byte transaction record on this page
 		while (bytes_to_read >= sizeof(struct scorw_log_record)) {
+			// Stop once we pass the target version (log is sorted)
+			if (record->version_num > (__u32)target_version) {
+				kunmap_atomic(kaddr);
+				put_page(page);
+				return;
+			}
 
-			// Safety check to avoid garbage data
-			if (record->version_num == target_version) { 
-				v = s_inode->version_states[target_version - 1];
-				if (v) {
-					// Store every block of this extent into the XArray!
-					for (i = 0; i < record->len_blks; i++) {
-						xa_store(&v->delta_map, 
-								record->logical_start_blk + i,
-								xa_mk_value(record->physical_start_blk + i), 
-								GFP_KERNEL);
-					}
+			if (record->version_num == (__u32)target_version) {
+				for (i = 0; i < record->len_blks; i++) {
+					xa_store(&v->delta_map, 
+							record->logical_start_blk + i,
+							xa_mk_value(record->physical_start_blk + i), 
+							GFP_KERNEL);
 				}
 			}
 
-			record++; // Move to the next 24-byte record
+			record++;
 			bytes_to_read -= sizeof(struct scorw_log_record);
 			offset += sizeof(struct scorw_log_record);
 		}
 
-		// Unmap and release the memory page so we don't leak RAM
 		kunmap_atomic(kaddr);
 		put_page(page); 
 	}
