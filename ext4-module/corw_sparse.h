@@ -15,6 +15,28 @@
 #define CHILD_NAME_LEN 16
 #define CHILD_RANGE_LEN 16
 
+
+//////////////////////
+//error messages
+//////////////////////
+#define SCORW_ERR_MAX_CHILDS_ALREADY_SET -8000	//parent already has max childs allowed in extended attributes
+#define SCORW_ERR_NON_EMPTY_FILE 	-8001	//Trying to convert non-empty file into corw sparse file.
+
+#define SCORW_OUT_OF_MEMORY 		-8002
+#define SCORW_PARENT_NOT_FOUND 		-8003
+#define SCORW_PARENT_ERROR 		-8004
+
+/*MAHA_AARSH_START*/
+#define MAX_RAM_VERSIONS 		    4
+#define SET_NORMAL_WRITE                    2
+#define SET_TRANSACTION		            1
+#define UNSET_TRANSACTION 		    0
+/*MAHA_AARSH_END*/
+///////////////////////
+//Information messages (Return values that try to convey something to caller other than error)
+//////////////////////
+#define SCORW_PERFORM_ORIG_READ		-9000	//return
+
 //MAHA_AARSH_start
 
 #include <linux/xarray.h>
@@ -190,9 +212,9 @@ struct scorw_inode
 	int is_see_thru_ro;
 	int version; //stores parent version for parent and child version for child
 	
-	struct scorw_version *version_states[MAX_VERSIONS]; //stores version states.
-
-	int loaded_versions[4]; // FIFO queue of loaded version numbers
+	// Version cache: at most MAX_RAM_VERSIONS xarrays kept in memory (no hard cap on version count)
+	struct scorw_version *version_cache[MAX_RAM_VERSIONS]; // cached version xarrays
+	int cache_v_nums[MAX_RAM_VERSIONS]; // which version number each slot holds (-1 = empty)
 	int loaded_version_count;
 	int fifo_head;
 
@@ -296,26 +318,7 @@ struct scorw_extent
 
 
 
-//////////////////////
-//error messages
-//////////////////////
-#define SCORW_ERR_MAX_CHILDS_ALREADY_SET -8000	//parent already has max childs allowed in extended attributes
-#define SCORW_ERR_NON_EMPTY_FILE 	-8001	//Trying to convert non-empty file into corw sparse file.
 
-#define SCORW_OUT_OF_MEMORY 		-8002
-#define SCORW_PARENT_NOT_FOUND 		-8003
-#define SCORW_PARENT_ERROR 		-8004
-
-/*MAHA_AARSH_START*/
-#define MAX_RAM_VERSIONS 		    4
-#define SET_NORMAL_WRITE                    2
-#define SET_TRANSACTION		            1
-#define UNSET_TRANSACTION 		    0
-/*MAHA_AARSH_END*/
-///////////////////////
-//Information messages (Return values that try to convey something to caller other than error)
-//////////////////////
-#define SCORW_PERFORM_ORIG_READ		-9000	//return
 
 /////////////
 //API's
