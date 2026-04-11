@@ -1357,7 +1357,7 @@ void scorw_free_inode(struct scorw_inode *scorw_inode)
 
 
 
-int is_corrupt(struct inode * inode){
+int scorw_is_opened_first_time(struct inode * inode){
 	struct ext4_sb_info * sbi;
 	struct ext4_super_block * es;
 	struct super_block *sb;
@@ -1381,11 +1381,87 @@ int is_corrupt(struct inode * inode){
 	return (mtime > lopen);
 }
 
+/*
+ * Scans the log file and truncates any records that exceed the safely
+ * committed version stored in the parent's xattr. Also discards partial records.
+ */
+void scorw_truncate_log_to_version(struct scorw_inode *s_inode)
+{
+	struct inode *log_inode = s_inode->i_log_vfs_inode;
+	loff_t log_size, offset = 0;
+	struct page *page;
+	char *kaddr;
+	struct scorw_log_record *record;
+	loff_t valid_size = 0;
+
+	if (!log_inode || IS_ERR(log_inode)) return;
+
+	log_size = i_size_read(log_inode);
+	if (log_size == 0) return;
+
+	while (offset < log_size) {
+		pgoff_t index = offset >> PAGE_SHIFT;
+		unsigned int page_offset = offset & (PAGE_SIZE - 1);
+		unsigned int bytes_to_read = PAGE_SIZE - page_offset;
+
+		if (offset + bytes_to_read > log_size)
+			bytes_to_read = log_size - offset;
+
+		page = read_mapping_page(log_inode->i_mapping, index, NULL);
+		if (IS_ERR(page)) {
+			printk(KERN_ERR "SCORW: Failed to read log page for truncation!\n");
+			break;
+		}
+
+		kaddr = (char *)kmap_atomic(page);
+		record = (struct scorw_log_record *)(kaddr + page_offset);
+
+		while (bytes_to_read >= sizeof(struct scorw_log_record)) {
+			// If we hit a log record from the future, abort scanning
+			if (record->version_num > s_inode->version) {
+				kunmap_atomic(kaddr);
+				put_page(page);
+				goto do_truncate;
+			}
+
+			valid_size += sizeof(struct scorw_log_record);
+			record++;
+			bytes_to_read -= sizeof(struct scorw_log_record);
+			offset += sizeof(struct scorw_log_record);
+		}
+
+		kunmap_atomic(kaddr);
+		put_page(page);
+		
+		// If there is a fragmented/incomplete record at the EOF, we ignore it 
+		// and it will get truncated off naturally.
+		if (bytes_to_read > 0 && offset + bytes_to_read >= log_size) {
+			break;
+		}
+	}
+
+do_truncate:
+	if (valid_size < log_size) {
+		printk("SCORW_DEBUG: Interrupted write detected. Truncating log from %lld to %lld bytes to maintain V%lu consistency\n", 
+				log_size, valid_size, s_inode->version);
+		
+		// Lock the inode, update the page cache size, and mark it dirty so it persists
+		inode_lock(log_inode);
+		truncate_setsize(log_inode, valid_size);
+		mark_inode_dirty(log_inode);
+		inode_unlock(log_inode);
+	} else {
+		printk("SCORW_DEBUG: Log file is perfectly consistent with xattr V%lu\n", s_inode->version);
+	}
+}
 
 void scorw_do_recovery(struct scorw_inode * scorw_inode , struct inode * inode){
 	/* Your logic goes here */
+	int latest_version = scorw_inode->version;
 	
-
+	
+	 
+	
 
 	return;
 }
@@ -1402,10 +1478,10 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 	int is_see_thru_ro = 0;
 	int to_be_checked;
 	
-	to_be_checked = is_corrupt(vfs_inode);
+	to_be_checked = scorw_is_opened_first_time(vfs_inode);
 	scorw_set_last_open_time(vfs_inode);
 
-	printk("[DEBUG] :: {%s} :: i_ino=%lu is_corrupt=%d\n" , __func__ , vfs_inode->i_ino , to_be_checked);
+	printk("[DEBUG] :: {%s} :: i_ino=%lu scorw_is_opened_first_time=%d\n" , __func__ , vfs_inode->i_ino , to_be_checked);
 	is_see_thru_ro = scorw_get_see_thru_attr_val(vfs_inode);
 	BUG_ON(is_see_thru_ro == -1);
 
@@ -1447,7 +1523,9 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 			scorw_inode->is_log_initialized = true;
 		}
 	}
-
+	if(to_be_checked){
+		scorw_truncate_log_to_version(scorw_inode);
+	}
 }
 
 //return 1 if child inodecd ./maha-flex-clone-cs-614-2026-Maha_port_clone/test_rajan/
@@ -2711,6 +2789,7 @@ struct page* scorw_get_page(struct inode* inode, loff_t lblk)
 	struct page *page = NULL;
 	//void *kaddr = NULL;
 	int error = 0;
+	loff_t isize = i_size_read(inode);
 
 	mapping = inode->i_mapping;
 
@@ -2731,6 +2810,17 @@ struct page* scorw_get_page(struct inode* inode, loff_t lblk)
 		printk(KERN_ERR "Error!! Failed to allocate page. Out of memory!!\n");
 		return NULL;
 	}
+
+	/* Adding logic incase a page is newly created */
+	if(lblk >= (isize >> PAGE_SHIFT))
+	{
+		memset(page_address(page), 0, PAGE_SIZE);
+		printk("[DEBUG] :: {%s} :: Requested block number: %lu is greater than logical blocks in file. Returning empty page\n", __func__, lblk);
+		SetPageUptodate(page);
+		unlock_page(page);
+		return page;
+	}
+
 
 	//If parent's page is already in cache, don't read it from disk
 	if(PageUptodate(page))
@@ -4563,7 +4653,7 @@ void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version)
 			printk(KERN_ERR "SCORW: Failed to read log page!\n");
 			break;
 		}
-
+		printk("[DEBUG] :: {%s} :: Read page_cache(%lu) for %lu\n" , __func__ , offset ,  log_inode->i_ino);
 		// Map the page into kernel RAM (just like your copy loop!)
 		kaddr = (char *)kmap_atomic(page);
 		record = (struct scorw_log_record *)(kaddr + page_offset);

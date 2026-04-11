@@ -143,7 +143,7 @@ static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
     struct scorw_inode *s_inode;
     int is_child_file;
 
-    printk("Helllllllllooooooooooooooooooooooo\n");
+    printk("[DEBUG] :: {%s} :: called for inode(%lu) with offset(%llu) and size(%lu)\n", __func__ , inode->i_ino ,iocb->ki_pos , iov_iter_count(to));
     if (unlikely(ext4_forced_shutdown(inode->i_sb)))
         return -EIO;
 

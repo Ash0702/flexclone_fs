@@ -82,6 +82,7 @@ struct scorw_log_record {
         __u64 physical_start_blk;// Where Ext4 actually put it on disk
         __u32 len_blks;          // How many blocks were written contiguously
         __u32 padding;           // Ensures 64-bit memory alignment
+		__u64 padding2;		     // Ensures 32bytes , which can divide 4Kb
 };
 // 2. RAM STRUCTURE: The fast lookup tree for a single version.
 struct scorw_version {
@@ -413,7 +414,7 @@ int scorw_get_see_thru_attr_val(struct inode *inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 u32 scorw_get_last_open_time(struct inode* inode);
 u32 scorw_set_last_open_time(struct inode* inode);
-int is_corrupt(struct inode * inode);
+int scorw_is_opened_first_time(struct inode * inode);
 //MAHA_VERSION_AARSH_end
 #endif
 
