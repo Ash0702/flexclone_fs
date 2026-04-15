@@ -18,7 +18,7 @@
 //MAHA_AARSH_start
 
 #include <linux/xarray.h>
-
+#define BLK_NOT_FOUND ~0UL
 //MAHA_AARSH_end
 
 #ifdef USE_OLD_RANGE

@@ -2345,18 +2345,19 @@ ssize_t scorw_read_from_parent(struct scorw_inode *s_inode, struct kiocb *iocb, 
 		read_inode = s_inode->i_vfs_inode;
 
 	logical_size = scorw_get_original_parent_size(read_inode);
-
+/*
 	// 1. CLAMP EOF: Stop reading past the original logical file size
 	if (orig_pos >= logical_size) {
 		return 0; // EOF
 	}
+
 
 	max_read = logical_size - orig_pos;
 	if (orig_count > max_read) {
 		iov_iter_truncate(to, max_read);
 		orig_count = max_read;
 	}
-
+*/
 	// 2. CLAMP BLOCK BOUNDARY: Force kernel to read one block at a time
 	// This ensures we never miss a Time Machine redirect that happens halfway through a read
 	bytes_to_page_end = PAGE_SIZE - (orig_pos & (PAGE_SIZE - 1));
@@ -2367,7 +2368,7 @@ ssize_t scorw_read_from_parent(struct scorw_inode *s_inode, struct kiocb *iocb, 
 	// 3. TIME MACHINE LOOKUP
 	target_phys_blk = scorw_lookup_physical_block(s_inode, orig_pos / PAGE_SIZE);
 
-	if (target_phys_blk != 0) {
+	if (target_phys_blk != BLK_NOT_FOUND) {
 		// MATCH: Shift offset to the CoW block in the Parent's memory
 		iocb->ki_pos = (loff_t)(target_phys_blk * PAGE_SIZE) + (orig_pos & (PAGE_SIZE - 1));
 
@@ -2379,6 +2380,9 @@ ssize_t scorw_read_from_parent(struct scorw_inode *s_inode, struct kiocb *iocb, 
 	}
 
 	// NO MATCH: Read baseline block from Parent's memory
+	if (orig_pos >= logical_size) {/*Incase entry not found in logs and >= original_size return 0*/
+		return 0; 
+	}
 	return generic_file_read_iter(iocb, to);
 }
 //MAHA_AARSH_end
@@ -4430,10 +4434,12 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	unsigned long appended_ext4_blk;
 	size_t count = iov_iter_count(i);
 	int status , error , start_blk = pos / PAGE_SIZE , end_blk = (pos + count)/PAGE_SIZE;
-	loff_t append_pos;
+	loff_t append_pos , logical_size;
 	unsigned int nr_blk;
 	size_t append_count;
-	unsigned long to_write_block ;
+	unsigned long to_write_block;
+
+	logical_size = scorw_get_original_parent_size(p_inode->i_vfs_inode);
 
 	if (!p_inode) return pos;
 	nr_blk = (end_blk - start_blk + 1);	
@@ -4458,23 +4464,25 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	
 
 	to_write_block = scorw_lookup_physical_block(p_inode, target_logical_blk);
-	if (scorw_internal_copy_blocks(file, to_write_block * PAGE_SIZE, append_pos, append_count) < 0) { 
-		return pos;
+		
+	if( (to_write_block != BLK_NOT_FOUND)  || (pos < logical_size) ){	
+		if (scorw_internal_copy_blocks(file, to_write_block * PAGE_SIZE, append_pos, append_count) < 0) { 
+			return pos;
+		}
 	}
-
 
 	// 2. Increment and PERSIST
 	if(status == SET_NORMAL_WRITE){
 		__sync_fetch_and_add(&(p_inode->version), 1);
 		scorw_set_curr_version_attr_val(inode, p_inode->version); // UPDATE DISK XATTR
-		printk("[DEBUG] :: {%s} updated version from %d -> %d" , __func__ , (p_inode->version) - 1 , p_inode->version);
+		//printk("[DEBUG] :: {%s} updated version from %d -> %d" , __func__ , (p_inode->version) - 1 , p_inode->version);
 	}
 
 	// 3. Log it
 	scorw_record_write(p_inode, target_logical_blk, appended_ext4_blk, nr_blk , status);
 
-	printk("SCORW_DEBUG: WRITE PARENT. Inode: %lu, New Version: %d, Blk: %lu -> Phys: %lu\n", 
-			inode->i_ino, p_inode->version, target_logical_blk, appended_ext4_blk);
+//	printk("SCORW_DEBUG: WRITE PARENT. Inode: %lu, New Version: %d, Blk: %lu -> Phys: %lu\n", 
+		//	inode->i_ino, p_inode->version, target_logical_blk, appended_ext4_blk);
 
 	if(status == SET_NORMAL_WRITE){
 		error = scorw_set_transaction(inode , file , UNSET_TRANSACTION);
@@ -4482,7 +4490,7 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 			printk("[ERROR] :: %s, line %d\n" , __func__ , __LINE__);
 			return -EIO;
 		}
-		printk("[%s] :: Released %d lock\n" , __func__ , status);
+//		printk("[%s] :: Released %d lock\n" , __func__ , status);
 	}
 	return append_pos + (pos % PAGE_SIZE);
 }
@@ -4735,6 +4743,7 @@ unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned 
 {
 	struct scorw_inode *source = s_inode;
 	int v;
+	loff_t logical_size;
 
 	if (!s_inode) return 0;
 
@@ -4744,7 +4753,7 @@ unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned 
 	}
 
 	for (v = s_inode->version; v >= 1; v--) {
-		printk("[DEBUG] :: {%s} :: Seeing version=%d , i_ino=%lu , target_log_blk=%lu" , __func__ , v , s_inode->i_ino_num  , target_logical_blk);
+		//printk("[DEBUG] :: {%s} :: Seeing version=%d , i_ino=%lu , target_log_blk=%lu" , __func__ , v , s_inode->i_ino_num  , target_logical_blk);
 		struct scorw_version *sv = scorw_get_or_create_version(source, v);
 
 		if (sv) {
@@ -4753,13 +4762,18 @@ unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned 
 				printk("[DEBUG] :: {%s} found block = %lu , target logical block = %lu \n",__func__, xa_to_value(found_blk) , target_logical_blk); 
 				 return xa_to_value(found_blk);
 			} else {
-				printk("not found verison checked = %d \n", v);
+			//	printk("not found verison checked = %d \n", v);
 			}
 		}
 	}
 	
+	logical_size = scorw_get_original_parent_size(source->i_vfs_inode);
+	logical_size /= PAGE_SIZE;
+	if(target_logical_blk <	 logical_size){
+		return target_logical_blk;
+	}
 
-	return 0;
+	return BLK_NOT_FOUND;
 }
 
 int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len , int status)
