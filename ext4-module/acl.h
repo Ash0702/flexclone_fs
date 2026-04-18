@@ -5,7 +5,9 @@
   (C) 2001 Andreas Gruenbacher, <a.gruenbacher@computer.org>
 */
 
+#include <linux/fs.h>
 #include <linux/posix_acl_xattr.h>
+#include <linux/jbd2.h>
 
 #define EXT4_ACL_VERSION	0x0001
 

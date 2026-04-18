@@ -13,6 +13,7 @@
 
 
 #include "corw_sparse.h"
+#include "truncate.h"
 
 #include <linux/fdtable.h>
 #include <linux/rcupdate.h>
@@ -1525,6 +1526,9 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 	}
 	if(to_be_checked){
 		scorw_truncate_log_to_version(scorw_inode);
+		/* After consistency check, run garbage collection to punch holes
+		 * for blocks no longer referenced by any child version. */
+		scorw_gc_blocks(scorw_inode);
 	}
 }
 
@@ -4433,7 +4437,7 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	unsigned long target_logical_blk = pos / PAGE_SIZE;
 	unsigned long appended_ext4_blk;
 	size_t count = iov_iter_count(i);
-	int status , error , start_blk = pos / PAGE_SIZE , end_blk = (pos + count)/PAGE_SIZE;
+	int status , error , start_blk = pos / PAGE_SIZE , end_blk = (pos + count-1)/PAGE_SIZE;
 	loff_t append_pos , logical_size;
 	unsigned int nr_blk;
 	size_t append_count;
@@ -4819,7 +4823,261 @@ int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, u
 }
 //MAHA_AARSH_end //
 
+// Garbage Collection Structures and Helpers
+struct gc_block_state {
+    __u32 version;
+    __u64 physical_block;
+};
 
+// Find the smallest active version >= target_ver. 
+// Returns -1 if no active version >= target_ver.
+static int scorw_gc_closest_active(int target_ver, int *active_vers, int num_active)
+{
+    int i;
+    for (i = 0; i < num_active; i++) {
+        if (active_vers[i] >= target_ver)
+            return active_vers[i];
+    }
+    return -1;
+}
+
+// Helper to punch a hole for a contiguous range of blocks
+void scorw_punch_hole_range(struct inode *inode, ext4_lblk_t start_lblk, ext4_lblk_t len_blks)
+{
+    ext4_lblk_t cur = start_lblk;
+    ext4_lblk_t end = start_lblk + len_blks;
+    int ret;
+    struct ext4_map_blocks map;
+    handle_t *handle;
+
+    while (cur < end) {
+        map.m_lblk = cur;
+        map.m_len = end - cur;
+        ret = ext4_map_blocks(NULL, inode, &map, 0);
+        
+        if (ret < 0) {
+            printk(KERN_ERR "SCORW GC: ext4_map_blocks error %d\n", ret);
+            break;
+        }
+        
+        /* If it's a hole (not mapped), simply advance and skip */
+        if (ret == 0 || !(map.m_flags & EXT4_MAP_MAPPED)) {
+            cur += map.m_len ? map.m_len : 1;
+            continue;
+        }
+        
+        /* Mapped! Punch it securely using Ext4 internals. */
+        down_write(&EXT4_I(inode)->i_data_sem);
+        ext4_discard_preallocations(inode);
+
+        ext4_es_remove_extent(inode, cur, map.m_len);
+
+        if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)) {
+            ret = ext4_ext_remove_space(inode, cur, cur + map.m_len - 1);
+        } else {
+            handle = ext4_journal_start(inode, EXT4_HT_TRUNCATE, ext4_blocks_for_truncate(inode));
+            if (!IS_ERR(handle)) {
+                ret = ext4_ind_remove_space(handle, inode, cur, cur + map.m_len);
+                ext4_journal_stop(handle);
+            } else {
+                ret = PTR_ERR(handle);
+            }
+        }
+
+        if (ret == 0)
+            ext4_es_insert_extent(inode, cur, map.m_len, ~0, EXTENT_STATUS_HOLE, 0);
+        
+        up_write(&EXT4_I(inode)->i_data_sem);
+        
+        if (ret) {
+            printk(KERN_ERR "SCORW GC: Hole punch failed at lblk %u len %u (err %d)\n", cur, map.m_len, ret);
+            break;
+        }
+
+        cur += map.m_len;
+    }
+}
+
+// Main logic for finding dynamically unneeded blocks and punching parent holes
+void scorw_gc_blocks(struct scorw_inode *s_inode)
+{
+    struct inode *log_inode;
+    struct inode *par_inode;
+    int child_versions[SCORW_MAX_CHILDS + 1];
+    int num_active = 0;
+    int i, j;
+    struct xarray state_map;
+    struct xarray garbage_blocks;
+    loff_t offset = 0, log_size;
+    struct page *page;
+    char *kaddr;
+    struct scorw_log_record *record;
+
+    if (!s_inode || !s_inode->i_log_vfs_inode)
+        return;
+
+    /* If called from the parent's own scorw_inode, i_par_vfs_inode is NULL.
+     * In that case, the parent IS this inode (i_vfs_inode). */
+    par_inode = s_inode->i_par_vfs_inode ? s_inode->i_par_vfs_inode : s_inode->i_vfs_inode;
+    if (!par_inode)
+        return;
+
+    log_inode = s_inode->i_log_vfs_inode;
+
+    // 1. Compile active versions
+    // Iterate extended attributes tracking children to grab their snapshots/versions
+    for (i = 0; i < SCORW_MAX_CHILDS; i++) {
+        unsigned long child_ino = scorw_get_child_i_attr_val(par_inode, i);
+        if (child_ino != 0) {
+            struct inode *c_inode = ext4_iget(par_inode->i_sb, child_ino, EXT4_IGET_NORMAL);
+            if (!IS_ERR_OR_NULL(c_inode)) {
+                unsigned long c_ver = scorw_get_child_version_attr_val(c_inode);
+                if (c_ver > 0)
+                    child_versions[num_active++] = (int)c_ver;
+                iput(c_inode);
+            }
+        }
+    }
+    
+    // Add parent's current version (max representation)
+    child_versions[num_active++] = s_inode->version;
+
+    // Sort active versions
+    for (i = 0; i < num_active - 1; i++) {
+        for (j = 0; j < num_active - i - 1; j++) {
+            if (child_versions[j] > child_versions[j + 1]) {
+                int tmp = child_versions[j];
+                child_versions[j] = child_versions[j + 1];
+                child_versions[j + 1] = tmp;
+            }
+        }
+    }
+
+    printk(KERN_INFO "SCORW GC: Collected %d active versions. Highest is %d\n", num_active, child_versions[num_active - 1]);
+
+    xa_init(&state_map);
+    xa_init(&garbage_blocks);
+
+    log_size = i_size_read(log_inode);
+    offset = 0;
+
+    // 2. Parse log sequentially to build block history and identify garbage writes
+    while (offset < log_size) {
+        pgoff_t index = offset >> PAGE_SHIFT;
+        unsigned int page_offset = offset & (PAGE_SIZE - 1);
+        unsigned int bytes_to_read = PAGE_SIZE - page_offset;
+
+        if (offset + bytes_to_read > log_size)
+            bytes_to_read = log_size - offset;
+
+        page = read_mapping_page(log_inode->i_mapping, index, NULL);
+        if (IS_ERR(page)) {
+            printk(KERN_ERR "SCORW GC: Failed to read log page at index %lu!\n", index);
+            break;
+        }
+
+        kaddr = (char *)kmap_atomic(page);
+        record = (struct scorw_log_record *)(kaddr + page_offset);
+
+        while (bytes_to_read >= sizeof(struct scorw_log_record)) {
+            __u32 v_new = record->version_num;
+            __u32 log_start = record->logical_start_blk;
+            __u64 phys_start = record->physical_start_blk;
+            __u32 len = record->len_blks;
+            int k;
+
+            if (v_new == 0) {
+                // Invalid or uninitialized record
+                record++;
+                bytes_to_read -= sizeof(struct scorw_log_record);
+                offset += sizeof(struct scorw_log_record);
+                continue;
+            }
+
+            // Distribute block-by-block handling 
+            for (k = 0; k < len; k++) {
+                unsigned long L = log_start + k;
+                unsigned long P_new = phys_start + k;
+                int v_old = 0;
+                unsigned long p_old = L;
+                struct gc_block_state *state;
+                int A_j;
+
+                state = xa_load(&state_map, L);
+                if (state) {
+                    v_old = state->version;
+                    p_old = state->physical_block;
+                }
+                
+                A_j = scorw_gc_closest_active(v_old, child_versions, num_active);
+                
+                /* If no active version needs v_old, or the closest one is already at v_new or beyond */
+                if (A_j == -1 || A_j >= v_new) {
+                    xa_store(&garbage_blocks, p_old, xa_mk_value(1), GFP_KERNEL);
+                }
+                
+                if (!state) {
+                    state = kmalloc(sizeof(struct gc_block_state), GFP_KERNEL);
+                    if (state) {
+                        state->version = v_new;
+                        state->physical_block = P_new;
+                        xa_store(&state_map, L, state, GFP_KERNEL);
+                    }
+                } else {
+                    state->version = v_new;
+                    state->physical_block = P_new;
+                }
+            }
+
+            record++;
+            bytes_to_read -= sizeof(struct scorw_log_record);
+            offset += sizeof(struct scorw_log_record);
+        }
+
+        kunmap_atomic(kaddr);
+        put_page(page);
+    }
+
+    // 3. Extent Consolidation and Punching Garbage physical allocations
+    {
+        unsigned long p_idx;
+        void *entry;
+        ext4_lblk_t range_start = 0;
+        ext4_lblk_t range_len = 0;
+        unsigned long garbage_count = 0;
+
+        xa_for_each(&garbage_blocks, p_idx, entry) {
+            garbage_count++;
+            if (range_len == 0) {
+                range_start = p_idx;
+                range_len = 1;
+            } else if (p_idx == range_start + range_len) {
+                range_len++;
+            } else {
+                scorw_punch_hole_range(par_inode, range_start, range_len);
+                range_start = p_idx;
+                range_len = 1;
+            }
+        }
+        if (range_len > 0) {
+            scorw_punch_hole_range(par_inode, range_start, range_len);
+        }
+        
+        printk(KERN_INFO "SCORW GC: Processed %lu total garbage blocks\n", garbage_count);
+    }
+
+    // Housekeeping: Free allocations
+    {
+        unsigned long idx;
+        struct gc_block_state *s;
+        xa_for_each(&state_map, idx, s) {
+            kfree(s);
+        }
+    }
+    
+    xa_destroy(&state_map);
+    xa_destroy(&garbage_blocks);
+}
 
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos, loff_t dest_pos, size_t len)
 {
