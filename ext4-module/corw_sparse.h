@@ -21,7 +21,7 @@
 #define BLK_NOT_FOUND ~0UL
 struct kiocb;
 struct iov_iter;
-//MAHA_AARSH_end
+// MAHA_AARSH_end
 
 #ifdef USE_OLD_RANGE
 struct child_range {
@@ -257,7 +257,7 @@ struct page_copy {
   unsigned block_num;
   struct scorw_inode *par; // scorw inode of parent. Useful to find parent inode
                            // num, children inodes
-  struct page *data_page; // page to store data
+  struct page *data_page;  // page to store data
   // struct mutex lock;
   int data_page_loaded;     // Has data been loaded into data_page?
   struct list_head ll_node; // linked list node
@@ -279,7 +279,7 @@ struct wait_for_commit {
 struct pending_frnd_version_cnt_inc {
   struct inode *child; // child inode corresponding which frnd inode is waiting
                        // for version update
-  struct inode *frnd; // frnd inode waiting for version update
+  struct inode *frnd;  // frnd inode waiting for version update
   unsigned long
       iter_id; // asynch thread scans all queued requests and sets an identifier
                // to each processed requests. This helps asynch thread to know
@@ -459,7 +459,9 @@ void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 u32 scorw_get_last_open_time(struct inode *inode);
 u32 scorw_set_last_open_time(struct inode *inode);
 int scorw_is_opened_first_time(struct inode *inode);
-void scorw_punch_hole_range(struct inode *inode, __u32 start_lblk, __u32 len_blks);
+void scorw_punch_hole_range(struct inode *inode, __u32 start_lblk,
+                            __u32 len_blks);
 void scorw_gc_blocks(struct scorw_inode *s_inode);
+int scorw_gc_find_next_active(int target_ver, int *active_vers, int num_active);
 // MAHA_VERSION_AARSH_end
 #endif
