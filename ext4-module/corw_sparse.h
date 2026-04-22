@@ -409,6 +409,7 @@ int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, u
 long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg);
 long scorw_set_transaction(struct inode * inode , struct file * file , int val);
 int scorw_self_transaction_status(struct inode * inode , struct file* file);
+long scorw_set_transaction_error(struct inode *inode, struct file *file);
 void init_Transaction_locks(struct scorw_inode * scorw_inode);
 int scorw_get_see_thru_attr_val(struct inode *inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
