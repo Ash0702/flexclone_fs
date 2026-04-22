@@ -28,9 +28,17 @@
 #include <trace/events/ext4.h>
 
 //MAHA_AARSH
-// TODO Move this into linux/fsmap
+// TODO Move this into linux/fsmap : that ain't happening ligga
+#include "corw_sparse.h"
+
+#define EXT4_BEGIN_TRANSACTION _IO('S' , 4) 
+#define EXT4_END_TRANSACTION _IO('S' , 3) 
+#define EXT4_COMMIT _IO('S' , 2)
 #define EXT4_UPDATE_VERSION _IO('S' , 1) 
 extern int update_version(struct inode* c_inode);
+
+#define SCORW_IOC_WRITEV _IOW('S', 2, struct scorw_writev_args)
+extern long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg); 
 //MAHA_AARSH
 
 
@@ -1631,6 +1639,17 @@ resizefs_out:
 		// return 0	for success
 		printk("Calling update for child\n"); 
 		return update_version(file_inode(filp));
+	
+	case SCORW_IOC_WRITEV:
+		return scorw_ioctl_see_thru_writev(filp, arg);  
+
+
+	case EXT4_BEGIN_TRANSACTION:
+		return scorw_set_transaction(file_inode(filp) , filp , SET_TRANSACTION);
+	case EXT4_END_TRANSACTION:
+		return scorw_set_transaction(file_inode(filp) , filp , UNSET_TRANSACTION);
+	case EXT4_COMMIT:	
+ 
 	//MAHA_AARSH_end
 		
 
@@ -1714,6 +1733,7 @@ long ext4_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case FS_IOC_SETFSLABEL:
 	case EXT4_IOC_GETFSUUID:
 	case EXT4_IOC_SETFSUUID:
+	case SCORW_IOC_WRITEV:
 		break;
 	default:
 		return -ENOIOCTLCMD;

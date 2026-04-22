@@ -18,7 +18,7 @@
 //MAHA_AARSH_start
 
 #include <linux/xarray.h>
-
+#define BLK_NOT_FOUND ~0UL
 //MAHA_AARSH_end
 
 #ifdef USE_OLD_RANGE
@@ -74,14 +74,15 @@ struct child_range_xattr
 //loff_t: long long 
 
 //MAHA_VERSION_AARSH_start
-// 1. DISK STRUCTURE: A single transaction record appended to your Log File.
-// Because it is a fixed 24 bytes, appending it is incredibly fast.
+/* 1. DISK STRUCTURE: A single transaction record appended to your Log File.
+      Because it is a fixed 24 bytes, appending it is incredibly fast.    */
 struct scorw_log_record {
         __u32 version_num;       // e.g., Version 2
         __u32 logical_start_blk; // Where the user wrote it (e.g., Block 5)
         __u64 physical_start_blk;// Where Ext4 actually put it on disk
         __u32 len_blks;          // How many blocks were written contiguously
         __u32 padding;           // Ensures 64-bit memory alignment
+		__u64 padding2;		     // Ensures 32bytes , which can divide 4Kb
 };
 // 2. RAM STRUCTURE: The fast lookup tree for a single version.
 struct scorw_version {
@@ -91,9 +92,25 @@ struct scorw_version {
         struct xarray delta_map; 
 };
 
+struct scorw_io_vec {
+    __u64 logical_offset;
+    __u32 len;
+    void __user *buf;
+};
+
+struct scorw_writev_args {
+    __u32 count;
+    struct scorw_io_vec __user *vecs;
+};
+
+
+struct Transaction_locks {
+	struct mutex transaction_lock;
+	struct file *owner;
+	int transaction;
+};
+
 //MAHA_VERSION_AARSH_end
-
-
 struct scorw_inode
 {
 	//inode number of inode this inode corresponds to 
@@ -182,6 +199,11 @@ struct scorw_inode
 
 	struct inode *i_log_vfs_inode;
 	unsigned long orig_size; //TODO : look at this
+
+	struct Transaction_locks t_locks; /* Imagine this case , 2 process open the same file.
+					     one of them calls BeginTransaction and the other EndTransaction. Ideally
+					     it should error , but it won't without a lock. We can put some unique file_pointer type shit
+			     		  */ 
 	
 	bool is_log_initialized; //to check if log file and ram structures have been initialized for this inode. This is needed because we want to delay initialization of log file and ram structures until we are sure that they are needed. We don't want to initialize them for all inodes that can potentially become parent because it will lead to too much overhead.
 	///MAHA_VERSION_AARSH_end	
@@ -285,6 +307,12 @@ struct scorw_extent
 #define SCORW_PARENT_NOT_FOUND 		-8003
 #define SCORW_PARENT_ERROR 		-8004
 
+/*MAHA_AARSH_START*/
+#define MAX_RAM_VERSIONS 		    4
+#define SET_NORMAL_WRITE                    2
+#define SET_TRANSACTION		            1
+#define UNSET_TRANSACTION 		    0
+/*MAHA_AARSH_END*/
 ///////////////////////
 //Information messages (Return values that try to convey something to caller other than error)
 //////////////////////
@@ -377,7 +405,17 @@ struct scorw_version* scorw_get_or_create_version(struct scorw_inode *s_inode, i
 void scorw_cleanup_versions(struct scorw_inode *s_inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode, unsigned long target_logical_blk);
-int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len);
+int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk, unsigned long physical_blk, unsigned int len ,int status);
+long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg);
+long scorw_set_transaction(struct inode * inode , struct file * file , int val);
+int scorw_self_transaction_status(struct inode * inode , struct file* file);
+long scorw_set_transaction_error(struct inode *inode, struct file *file);
+void init_Transaction_locks(struct scorw_inode * scorw_inode);
+int scorw_get_see_thru_attr_val(struct inode *inode);
+void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
+u32 scorw_get_last_open_time(struct inode* inode);
+u32 scorw_set_last_open_time(struct inode* inode);
+int scorw_is_opened_first_time(struct inode * inode);
 //MAHA_VERSION_AARSH_end
 #endif
 
