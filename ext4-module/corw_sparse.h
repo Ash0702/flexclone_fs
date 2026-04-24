@@ -85,7 +85,7 @@ struct scorw_log_record {
   __u32 logical_start_blk;  // Where the user wrote it (e.g., Block 5)
   __u64 physical_start_blk; // Where Ext4 actually put it on disk
   __u32 len_blks;           // How many blocks were written contiguously
-  __u32 padding;            // Ensures 64-bit memory alignment
+  __u32 data_crc32c;        // Ensures 64-bit memory alignment & Checksum
   __u64 padding2;           // Ensures 32bytes , which can divide 4Kb
 };
 // 2. RAM STRUCTURE: The fast lookup tree for a single version.
@@ -429,7 +429,7 @@ void scorw_read_barrier_end(struct scorw_inode *p_scorw_inode,
 // extern int scorw_get_log_file_name_attr(struct inode *inode, char *name);
 extern ssize_t ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from);
 loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i,
-                               loff_t pos);
+                               loff_t pos, int *out_status);
 void write_offset_log(struct inode *l_inode, loff_t offset, int len, void *ptr);
 int scorw_internal_copy_blocks(struct file *file, loff_t src_pos,
                                loff_t dest_pos, size_t len);
@@ -449,11 +449,13 @@ unsigned long scorw_lookup_physical_block(struct scorw_inode *s_inode,
                                           unsigned long target_logical_blk);
 int scorw_record_write(struct scorw_inode *s_inode, unsigned long logical_blk,
                        unsigned long physical_blk, unsigned int len,
-                       int status);
+                       int status, __u32 data_crc);
+void scorw_write_see_thru_ro_end(struct file *file, unsigned long target_logical_blk, unsigned long appended_ext4_blk, unsigned int nr_blk, int status);
 long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg);
-long scorw_set_transaction(struct inode *inode, struct file *file, int val);
-int scorw_self_transaction_status(struct inode *inode, struct file *file);
-void init_Transaction_locks(struct scorw_inode *scorw_inode);
+long scorw_set_transaction(struct inode * inode , struct file * file , int val);
+int scorw_self_transaction_status(struct inode * inode , struct file* file);
+long scorw_set_transaction_error(struct inode *inode, struct file *file);
+void init_Transaction_locks(struct scorw_inode * scorw_inode);
 int scorw_get_see_thru_attr_val(struct inode *inode);
 void scorw_replay_log_version(struct scorw_inode *s_inode, int target_version);
 u32 scorw_get_last_open_time(struct inode *inode);
