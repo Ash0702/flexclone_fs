@@ -1675,13 +1675,16 @@ void scorw_prepare_par_inode(struct scorw_inode *scorw_inode, struct inode *vfs_
 		}
 	}
 	if(to_be_checked){
+		
+		/* Sync the log and xattr_val (by truncating the log)*/
+		scorw_truncate_log_to_version(scorw_inode);
+		
+
 		/* Perform deep two-way recovery:
 		 * 1. Remove log records that lack parent data blocks.
 		 * 2. Remove parent blocks that lack log records. */
 		scorw_do_recovery(scorw_inode, vfs_inode);
 
-		/* Basic log consistency trim */
-		scorw_truncate_log_to_version(scorw_inode);
 		
 		/* After consistency check, run garbage collection to punch holes
 		 * for blocks no longer referenced by any child version. */
@@ -4606,6 +4609,9 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	unsigned int nr_blk;
 	size_t append_count;
 	unsigned long to_write_block;
+	unsigned long copy_helper;
+        unsigned long start_page_idx, end_page_idx;
+	
 
 	logical_size = scorw_get_original_parent_size(p_inode->i_vfs_inode);
 
@@ -4634,9 +4640,20 @@ loff_t scorw_write_see_thru_ro(struct file *file, struct iov_iter *i, loff_t pos
 	to_write_block = scorw_lookup_physical_block(p_inode, target_logical_blk);
 		
 	if( (to_write_block != BLK_NOT_FOUND)  || (pos < logical_size) ){	
-		if (scorw_internal_copy_blocks(file, to_write_block * PAGE_SIZE, append_pos, append_count) < 0) { 
-			return pos;
-		}
+		start_page_idx = pos/PAGE_SIZE;
+                end_page_idx = (pos + count - 1)/PAGE_SIZE;
+                copy_helper = end_page_idx - start_page_idx;
+                if ( (pos % PAGE_SIZE) || (copy_helper == 0 && (pos + count) % PAGE_SIZE != 0) ) {
+                        if (scorw_internal_copy_blocks(file, to_write_block * PAGE_SIZE, append_pos, PAGE_SIZE) < 0) { 
+                                return pos; 
+                        }
+                }
+                if ( ((pos + count) % PAGE_SIZE) && (copy_helper > 0) && (end_page_idx * PAGE_SIZE < logical_size) ) {
+                        if (scorw_internal_copy_blocks(file, (end_page_idx) * PAGE_SIZE,
+                                                                 append_pos + (copy_helper * PAGE_SIZE), PAGE_SIZE) < 0) { 
+                                return pos; 
+                        }
+                }
 	}
 
 	// 2. Increment and PERSIST
