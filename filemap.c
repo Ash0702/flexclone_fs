@@ -465,13 +465,13 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
     //scorw end
 	
 	//scorw start
-	////Commentedprintk("[%u]%s(): inode: %lu being synced. Num dirty pages: %lu, mapping_tagged(mapping, PAGECACHE_TAG_DIRTY): %d, mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK): %d\n", current->pid, __func__, inode->i_ino, inode->i_mapping->nrpages, mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY), mapping_tagged(inode->i_mapping, PAGECACHE_TAG_WRITEBACK));
+	//printk("[%u]%s(): inode: %lu being synced. Num dirty pages: %lu, mapping_tagged(mapping, PAGECACHE_TAG_DIRTY): %d, mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK): %d\n", current->pid, __func__, inode->i_ino, inode->i_mapping->nrpages, mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY), mapping_tagged(inode->i_mapping, PAGECACHE_TAG_WRITEBACK));
 
 	//Making sure that frnd blks are not synced until child's inode with updated version count
 	//has been committed to journal
 	/*if(is_ext4_module_sb(inode->i_sb) && (inode->i_ino != 0) && (inode->i_can_sync_frnd == -1))
 	{
-		////Commentedprintk("%s(): Trying to sync frnd inode (inode num: %lu). However, its can sync flag is set to -1. So, skipping its writeback\n", __func__, inode->i_ino);
+		//printk("%s(): Trying to sync frnd inode (inode num: %lu). However, its can sync flag is set to -1. So, skipping its writeback\n", __func__, inode->i_ino);
 		return 0;
 	}
 	*/
@@ -479,7 +479,7 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 	//Write child blocks to disk before writing parent blocks
 	if(is_ext4_module_sb(inode->i_sb) && (inode->i_ino != 0) && is_par_inode && (is_par_inode(inode, 1)))
 	{
-		//Commentedprintk("[%u]{%s}: inode: %lu is a parent file.Attempting to sync it\n", current->pid, __func__, inode->i_ino);
+		//printk("[%u]%s(): inode: %lu is a parent file.\n", current->pid, __func__, inode->i_ino);
 		//We want to avoid the creation of child while writeback of par is happening
 		//This solves the following edge case
 		//      write(blk 0 of par)
@@ -499,12 +499,11 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 		//
 		mutex_lock(&(inode->i_vfs_inode_writeback_sync_lock));
 		sb = inode->i_sb;	//superblock
-		//Commentedprintk("[%u]{%s}: inode: %lu Acquired Lock bitchass nigga\n", current->pid, __func__, inode->i_ino);
-		
+
 		//set PAGECACHE_TAG_TOWRITE tag corresponding dirty pages of parent file
 		//Note: block numbers are inclusive
 		tag_pages_for_writeback(mapping, start_block_num, end_block_num);
-		////Commentedprintk("[%u]%s(): tagged parent pages in the range %u:%u\n", current->pid, __func__, start_block_num, end_block_num);
+		//printk("[%u]%s(): tagged parent pages in the range %u:%u\n", current->pid, __func__, start_block_num, end_block_num);
 
 		//pagevec_init(&pvec); Rajan
 		folio_batch_init(&fbatch);
@@ -512,7 +511,7 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 		while(index <= end_block_num)
 		{
 			//select pages which have been chosen for writeback
-			//Commentedprintk("[%u]{%s}: Processing child pages starting from index: %lu\n", current->pid, __func__, index);
+			//printk("[%u]%s(): Processing child pages starting from index: %lu\n", current->pid, __func__, index);
 			//nr_pages = pagevec_lookup_range_tag(&pvec, inode->i_mapping, &index, end_block_num, PAGECACHE_TAG_TOWRITE); Rajan
 			nr_pages = filemap_get_folios_tag(inode->i_mapping, &index,
                                   end_block_num, PAGECACHE_TAG_TOWRITE,
@@ -520,13 +519,13 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 
 			if(nr_pages)
 			{
-				////Commentedprintk("[%u]%s(): Processing %ld pages in current iteration\n", current->pid, __func__, nr_pages);
+				//printk("[%u]%s(): Processing %ld pages in current iteration\n", current->pid, __func__, nr_pages);
 				//for each chosen page of parent file, process corresponding child file blocks
 				for (i = 0; i < nr_pages; i++)
 				{
 					//struct page *page = pvec.pages[i]; Removed Rajan
 					struct page *page = &(fbatch.folios[i]->page);
-					////Commentedprintk("[%u]%s(): parent file, page at index: %lu is dirty\n", current->pid, __func__, page->index);
+					//printk("[%u]%s(): parent file, page at index: %lu is dirty\n", current->pid, __func__, page->index);
 
 					//Prepare wbc for child files. This same wbc can be used for all children.
 					struct writeback_control child_wbc = {
@@ -554,7 +553,7 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 						{
 							continue;
 						}
-						////Commentedprintk("[%u]%s(): parent file, child %lu of parent, having inode num: %lu chosen\n", current->pid, __func__, j, child_inode_num);
+						//printk("[%u]%s(): parent file, child %lu of parent, having inode num: %lu chosen\n", current->pid, __func__, j, child_inode_num);
 
 						//Assuming, frnd file can only be deleted if its corresponding
 						//child file has been deleted
@@ -566,7 +565,7 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 							iput(child_inode);
 							continue;
 						}
-						////Commentedprintk("[%u]%s(): parent file, friend file of child %lu of parent, has inode num: %lu\n", current->pid,  __func__, j, friend_inode_num);
+						//printk("[%u]%s(): parent file, friend file of child %lu of parent, has inode num: %lu\n", current->pid,  __func__, j, friend_inode_num);
 						
 						//Note:
 						//1) This condition implicitly handles the cases of blk not being in
@@ -589,23 +588,23 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 						//
 						if((!(find_page_copy(page->index, inode->i_ino, j)) && !is_block_copied(friend_inode, page->index)))
 						{
-							////Commentedprintk("[%u]%s(): child %lu of parent neither has block: %lu copied nor in page copy. Don't need to wait for writeback for this child's blk.\n", current->pid,  __func__, j, page->index);
+							//printk("[%u]%s(): child %lu of parent neither has block: %lu copied nor in page copy. Don't need to wait for writeback for this child's blk.\n", current->pid,  __func__, j, page->index);
 							iput(child_inode);
 							iput(friend_inode);
 							continue;
 						}
 
-						////Commentedprintk("[%u]%s(): find_page_copy(%lu, %lu, %lu): %x\n", current->pid, __func__, page->index, inode->i_ino, j, find_page_copy(page->index, inode->i_ino, j));
-						////Commentedprintk("[%u]%s(): is_block_copied(friend_inode, %lu): %d\n", current->pid, __func__, page->index, is_block_copied(friend_inode, page->index));
+						//printk("[%u]%s(): find_page_copy(%lu, %lu, %lu): %x\n", current->pid, __func__, page->index, inode->i_ino, j, find_page_copy(page->index, inode->i_ino, j));
+						//printk("[%u]%s(): is_block_copied(friend_inode, %lu): %d\n", current->pid, __func__, page->index, is_block_copied(friend_inode, page->index));
 
 
 						//wait for data from page copy struct to be copied to child
 						//This handles both cases: 	a) When blk is already copied to child
 						//				b) when blk is yet to be copied from page struct to child
 						//
-						//Commentedprintk("[%u]%s(): waiting for contents of page: %lu to be copied to child: %ld\n", current->pid, __func__, page->index, j);
+						printk("[%u]%s(): waiting for contents of page: %lu to be copied to child: %ld\n", current->pid, __func__, page->index, j);
 						wait_event(sync_child_wait_queue, is_block_copied(friend_inode, page->index));
-						//Commentedprintk("[%u]%s(): Woke up. parent file, child %lu of parent has page copied at index: %lu\n", current->pid, __func__, j, page->index);
+						printk("[%u]%s(): Woke up. parent file, child %lu of parent has page copied at index: %lu\n", current->pid, __func__, j, page->index);
 
 						//Don't forget to do put_page()
 						child_page = find_get_page(child_inode->i_mapping, page->index);
@@ -614,7 +613,7 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 						//So, we don't need to do anything for this page.
 						if(!child_page)
 						{
-							////Commentedprintk("[%u]%s(): child %lu's page : %lu, is not in page cache\n", current->pid, __func__, j, page->index);
+							//printk("[%u]%s(): child %lu's page : %lu, is not in page cache\n", current->pid, __func__, j, page->index);
 							iput(child_inode);
 							iput(friend_inode);
 							continue;
@@ -629,16 +628,16 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 						//So, we don't need to do anything for this page
 						if(!PageDirty(child_page))
 						{
-							////Commentedprintk("[%u]%s(): child %lu's page : %lu, is in page cache but not dirty\n", current->pid, __func__, j, page->index);
+							//printk("[%u]%s(): child %lu's page : %lu, is in page cache but not dirty\n", current->pid, __func__, j, page->index);
 							put_page(child_page);
 							iput(child_inode);
 							iput(friend_inode);
 							continue;
 						}
-						////Commentedprintk("[%u]%s(): child %lu's page : %lu, is in page cache and dirty\n", current->pid, __func__, j, page->index);
+						//printk("[%u]%s(): child %lu's page : %lu, is in page cache and dirty\n", current->pid, __func__, j, page->index);
 						
 						//perform writeback of child file's blocks
-						////Commentedprintk("[%u]%s(): performing writeback of child %lu's page : %lu\n", current->pid, __func__, j, page->index);
+						//printk("[%u]%s(): performing writeback of child %lu's page : %lu\n", current->pid, __func__, j, page->index);
 						wbc_attach_fdatawrite_inode(&child_wbc, child_inode);
 						do_writepages(child_inode->i_mapping, &child_wbc);
 						wbc_detach_inode(&child_wbc);
@@ -653,13 +652,13 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 			}
 			else
 			{
-				////Commentedprintk("[%u]%s(): No more child pages to process\n", current->pid, __func__);
+				//printk("[%u]%s(): No more child pages to process\n", current->pid, __func__);
 				//pagevec_release(&pvec); Rajan
 				folio_batch_release(&fbatch);
 				break;
 			}
 		}	
-		////Commentedprintk("[%u]%s(): All children blks corresponding tagged parent pages in the range %u:%u written\n", current->pid, __func__, start_block_num, end_block_num);
+		//printk("[%u]%s(): All children blks corresponding tagged parent pages in the range %u:%u written\n", current->pid, __func__, start_block_num, end_block_num);
 
 		//Special flag helps in writeback of parent
 		wbc->is_attached_to_parent_file = 1;
@@ -692,12 +691,12 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 
 			if (sbi->s_journal)
 			{
-				////Commentedprintk("Calling scorw_fsync_journal for child inode: %lu\n", child_inode_num);
+				//printk("Calling scorw_fsync_journal for child inode: %lu\n", child_inode_num);
 				ret = scorw_fsync_journal(child_inode, datasync, &needs_barrier);
 			}
 
 			if (needs_barrier) {
-				////Commentedprintk("Triggering barrier for child inode: %lu\n", child_inode_num);
+				//printk("Triggering barrier for child inode: %lu\n", child_inode_num);
 				err = blkdev_issue_flush(child_inode->i_sb->s_bdev); //removed 2nd, 3rd argument fr porting...Rajan
 				if (!ret)
 					ret = err;
@@ -708,29 +707,23 @@ int filemap_fdatawrite_wbc(struct address_space *mapping,
 	/*
 	else
 	{
-		//Commentedprintk("[%u]%s(): Skipped writing children blocks. Will write directly to par\n", current->pid, __func__);
+		printk("[%u]%s(): Skipped writing children blocks. Will write directly to par\n", current->pid, __func__);
 	}
 	*/
         //scorw end
 	
 
-	if (!mapping_can_writeback(mapping) || !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY)){
-		if(is_ext4_module_sb(inode->i_sb) && (inode->i_ino != 0) && is_par_inode && (is_par_inode(inode, 1))){
-			mutex_unlock(&(inode->i_vfs_inode_writeback_sync_lock)); //release the lock which we acquired
-		}
+	if (!mapping_can_writeback(mapping) ||
+	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		return 0;
-	}
-	
-	//Commentedprintk("[%u]{%s} :: going into do_writepages for inode=%lu" ,current->pid , __func__ , inode->i_ino );
+
 	wbc_attach_fdatawrite_inode(wbc, mapping->host);
 	ret = do_writepages(mapping, wbc);
 	wbc_detach_inode(wbc);
-	//Commentedprintk("[%u]{%s} :: Came out of do_writepages for inode=%lu" ,current->pid , __func__ , inode->i_ino );
         //scorw start
-	////Commentedprintk("[%u]%s(): inode: %lu got synced. mapping_tagged(mapping, PAGECACHE_TAG_DIRTY): %d, mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK): %d\n", current->pid, __func__, inode->i_ino, mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY), mapping_tagged(inode->i_mapping, PAGECACHE_TAG_WRITEBACK));
+	//printk("[%u]%s(): inode: %lu got synced. mapping_tagged(mapping, PAGECACHE_TAG_DIRTY): %d, mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK): %d\n", current->pid, __func__, inode->i_ino, mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY), mapping_tagged(inode->i_mapping, PAGECACHE_TAG_WRITEBACK));
 	if(is_ext4_module_sb(inode->i_sb) && (inode->i_ino != 0) && is_par_inode && (is_par_inode(inode, 1)))
 	{
-		//Commentedprintk("[%u]{%s} :: Released the Lock_bitch ass nigga for inode=%lu" ,current->pid , __func__ , inode->i_ino );
 		mutex_unlock(&(inode->i_vfs_inode_writeback_sync_lock)); //release the lock
 	}
         //scorw end
@@ -1122,6 +1115,7 @@ int file_write_and_wait_range(struct file *file, loff_t lstart, loff_t lend)
 	struct address_space *mapping = file->f_mapping;
 
 	struct inode *inode = mapping->host;	
+	printk("[FILEMAP] :: {%s} I got called for i_ino=%lu\n" , __func__ , inode->i_ino);
 	if (lend < lstart)
 		return 0;
 
@@ -1129,6 +1123,7 @@ int file_write_and_wait_range(struct file *file, loff_t lstart, loff_t lend)
 		err = __filemap_fdatawrite_range(mapping, lstart, lend,
 						 WB_SYNC_ALL);
 		/* See comment of filemap_write_and_wait() */
+		printk("Returned from __filemap_fdatawrite_range with i_ino=%lu\n" , inode->i_ino);
 		if (err != -EIO)
 			__filemap_fdatawait_range(mapping, lstart, lend);
 	}
@@ -1143,13 +1138,13 @@ int scorw_inode_write_and_wait_range(struct inode *inode, loff_t lstart, loff_t 
 {
 	/*if(called_from_ext4_module())
         {
-                //Commentedprintk("file_write_and_wait_range called\n");
+                printk("file_write_and_wait_range called\n");
         }*/
 	int err = 0;
 	struct address_space *mapping = inode->i_mapping;
 
 	if (mapping_needs_writeback(mapping)) {
-		////Commentedprintk("%s(): inode needs writeback.\n", __func__);
+		//printk("%s(): inode needs writeback.\n", __func__);
 		err = __filemap_fdatawrite_range(mapping, lstart, lend,
 						 WB_SYNC_ALL);
 		/* See comment of filemap_write_and_wait() */
@@ -1159,7 +1154,7 @@ int scorw_inode_write_and_wait_range(struct inode *inode, loff_t lstart, loff_t 
 	/*
 	else
 	{
-		//Commentedprintk("%s(): inode doesnot need writeback.\n", __func__);
+		printk("%s(): inode doesnot need writeback.\n", __func__);
 	}
 	*/
 	/*

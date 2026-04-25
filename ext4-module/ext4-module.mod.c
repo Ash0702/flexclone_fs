@@ -547,6 +547,7 @@ __used __section("__versions") = {
 	{ 0x6fbeb822, "init_user_ns" },
 	{ 0xd9491c14, "xa_destroy" },
 	{ 0x852e37a8, "file_path" },
+	{ 0x8fa25c24, "xa_find" },
 	{ 0x78879188, "fscrypt_ioctl_add_key" },
 	{ 0xe091c977, "list_sort" },
 	{ 0xb36b71f5, "fscrypt_fname_disk_to_usr" },
@@ -617,6 +618,7 @@ __used __section("__versions") = {
 	{ 0xbf9665b4, "wait_for_commit_list" },
 	{ 0xafc08054, "dotdot_name" },
 	{ 0x1ab18f11, "proc_create_single_data" },
+	{ 0xdf36914b, "xa_find_after" },
 	{ 0xfea2631f, "inode_io_list_del" },
 	{ 0x7b28196f, "jbd2_journal_lock_updates" },
 	{ 0x7d16dec1, "filemap_write_and_wait_range" },
@@ -696,4 +698,4 @@ __used __section("__versions") = {
 MODULE_INFO(depends, "");
 
 
-MODULE_INFO(srcversion, "5C2E51B7156647611A62307");
+MODULE_INFO(srcversion, "ABF195BA5DB919E3F1ECEA1");
