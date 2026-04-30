@@ -5533,6 +5533,7 @@ long scorw_ioctl_see_thru_writev(struct file *file, unsigned long arg)
 			"then panicking. Log inode %lu NOT flushed.\n",
 			inode->i_ino, p_inode->i_log_vfs_inode->i_ino);
 		filemap_write_and_wait(inode->i_mapping);
+		sync_inode_metadata(inode, 1);
 		panic("SCORW TEST Scenario B / writev: crash after data write, before log flush");
 	}
 
