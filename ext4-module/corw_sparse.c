@@ -1455,6 +1455,7 @@ void scorw_truncate_log_to_version(struct scorw_inode *s_inode)
 	loff_t current_version_start_offset = 0;
 	int current_evaluating_version = 0;
 	__u32 safe_version = s_inode->version;
+	loff_t max_valid_parent_size = 0;
 
 	if (!log_inode || IS_ERR(log_inode)) return;
 
@@ -1463,6 +1464,11 @@ void scorw_truncate_log_to_version(struct scorw_inode *s_inode)
 
 	log_page_buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!log_page_buf) return;
+
+	max_valid_parent_size = scorw_get_original_parent_size(s_inode->i_vfs_inode);
+	if (max_valid_parent_size == 0) {
+		max_valid_parent_size = i_size_read(s_inode->i_vfs_inode);
+	}
 
 	while (offset < log_size) {
 		pgoff_t index = offset >> PAGE_SHIFT;
@@ -1501,6 +1507,13 @@ void scorw_truncate_log_to_version(struct scorw_inode *s_inode)
 				}
 			}
 
+			{
+				loff_t rec_end_size = (loff_t)(record->physical_start_blk + record->len_blks) << PAGE_SHIFT;
+				if (rec_end_size > max_valid_parent_size) {
+					max_valid_parent_size = rec_end_size;
+				}
+			}
+
 			valid_size += sizeof(struct scorw_log_record);
 			record++;
 			bytes_to_read -= sizeof(struct scorw_log_record);
@@ -1525,6 +1538,16 @@ do_truncate:
 	if (current_evaluating_version > safe_version && valid_size == log_size) {
 		s_inode->version = current_evaluating_version;
 		// scorw_set_curr_version_attr_val(s_inode->i_vfs_inode, s_inode->version);
+	}
+
+	if (i_size_read(s_inode->i_vfs_inode) > max_valid_parent_size && max_valid_parent_size > 0) {
+		struct inode *p_inode = s_inode->i_vfs_inode;
+		inode_lock(p_inode);
+		truncate_setsize(p_inode, max_valid_parent_size);
+		ext4_truncate(p_inode);
+		inode_unlock(p_inode);
+		printk(KERN_INFO "SCORW RECOVERY: Truncated parent inode %lu down to safe size %llu\n", 
+			p_inode->i_ino, max_valid_parent_size);
 	}
 }
 
@@ -4720,8 +4743,9 @@ void scorw_write_see_thru_ro_end(struct file *file, unsigned long target_logical
 		printk(KERN_CRIT "SCORW TEST [Scenario B]: Flushing parent data inode %lu to disk, "
 			"then panicking. Log inode %lu NOT flushed.\n",
 			inode->i_ino, p_inode->i_log_vfs_inode->i_ino);
-		/* Force only the parent data to disk */
+		/* Force parent data to disk AND commit inode metadata */
 		filemap_write_and_wait(inode->i_mapping);
+		sync_inode_metadata(inode, 1);
 		/* Log page cache is intentionally NOT flushed here */
 		panic("SCORW TEST Scenario B: crash after data write, before log flush");
 	}
@@ -4747,6 +4771,7 @@ void scorw_write_see_thru_ro_end(struct file *file, unsigned long target_logical
 		filemap_write_and_wait(p_inode->i_log_vfs_inode->i_mapping);
 		sync_inode_metadata(p_inode->i_log_vfs_inode, 1);
 		filemap_write_and_wait(inode->i_mapping);
+		sync_inode_metadata(inode, 1);
 		/* Do NOT update xattr — safe_version stays old */
 		panic("SCORW TEST Scenario C: bad CRC persisted, both files flushed");
 	}
